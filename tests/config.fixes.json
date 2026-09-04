@@ -1,0 +1,46 @@
+{
+  "host": "127.0.0.1",
+  "port": 8898,
+  "maxAttempts": 3,
+  "cooldownMs": 1000,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "debug",
+  "breaker": {
+    "enabled": false
+  },
+  "halfOpen": {
+    "enabled": false
+  },
+  "accessKeys": {
+    "sk-fix-aaa": {
+      "name": "修复用户A",
+      "rpm": 1000,
+      "daily": 100,
+      "enabled": true
+    },
+    "sk-fix-bbb": {
+      "name": "修复用户B",
+      "rpm": 1000,
+      "daily": 100
+    }
+  },
+  "providers": [
+    {
+      "name": "mockA",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": [
+        "MOCK-A1"
+      ]
+    }
+  ],
+  "models": {
+    "auto": [
+      {
+        "provider": "mockA",
+        "model": "mock-model"
+      }
+    ]
+  },
+  "defaults": {}
+}

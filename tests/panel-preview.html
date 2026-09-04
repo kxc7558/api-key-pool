@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+
+<title>API Key 代理池 · 状态</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:#f7f8fa;color:#1f2328;margin:0;padding:32px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:13px;margin-bottom:20px}
+  .cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px 18px;min-width:110px}
+  .card b{display:block;font-size:22px;margin-top:4px}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;font-size:13px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f1f3}
+  th{background:#fafbfc;font-weight:600;color:#4b5563}
+  tr:last-child td{border-bottom:none}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  .err{color:#9ca3af;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tip{margin-top:18px;font-size:12px;color:#6b7280;line-height:1.7}
+</style></head><body>
+<h1>API Key 代理池 · 运行状态</h1>
+<div class="sub">监听 <code>http://127.0.0.1:8787</code> · 运行 166s · 页面每 5 秒自动刷新</div>
+<div class="cards">
+  <div class="card">Key 总数<b>7</b></div>
+  <div class="card">可用<b style="color:#16a34a">6</b></div>
+  <div class="card">冷却中<b style="color:#d97706">0</b></div>
+  <div class="card">已下线<b style="color:#dc2626">1</b></div>
+  <div class="card">成功<b style="color:#16a34a">57</b></div>
+  <div class="card">限流次数<b style="color:#d97706">2</b></div>
+</div>
+<table><thead><tr><th>Key</th><th>值</th><th>账号组</th><th>状态</th><th>并发</th><th>RPM(60s)</th><th>成功</th><th>失败</th><th>429</th><th>最近耗时(ms)</th><th>最近错误</th></tr></thead>
+<tbody><tr>
+      <td><code>mockA#1</code></td>
+      <td><code>BA***</code></td>
+      <td><code>acct0</code></td>
+      <td><span class="dot" style="background:#dc2626"></span>已下线</td>
+      <td>0</td>
+      <td>0/40 (组)</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>-</td>
+      <td class="err">401 {"error":{"message":"invalid api key","code":"auth_error</td>
+    </tr><tr>
+      <td><code>mockA#2</code></td>
+      <td><code>MO***</code></td>
+      <td><code>acct1</code></td>
+      <td><span class="dot" style="background:#16a34a"></span>可用</td>
+      <td>0</td>
+      <td>8/40 (组)</td>
+      <td>14</td>
+      <td>0</td>
+      <td>0</td>
+      <td>3</td>
+      <td class="err"></td>
+    </tr><tr>
+      <td><code>mockA#3</code></td>
+      <td><code>MO***</code></td>
+      <td><code>acct1</code></td>
+      <td><span class="dot" style="background:#16a34a"></span>可用</td>
+      <td>0</td>
+      <td>8/40 (组)</td>
+      <td>14</td>
+      <td>0</td>
+      <td>0</td>
+      <td>2</td>
+      <td class="err"></td>
+    </tr><tr>
+      <td><code>mockB#1</code></td>
+      <td><code>RA***</code></td>
+      <td>-</td>
+      <td><span class="dot" style="background:#16a34a"></span>可用</td>
+      <td>0</td>
+      <td>1/∞</td>
+      <td>2</td>
+      <td>0</td>
+      <td>2</td>
+      <td>2</td>
+      <td class="err">429</td>
+    </tr><tr>
+      <td><code>mockB#2</code></td>
+      <td><code>MO***</code></td>
+      <td>-</td>
+      <td><span class="dot" style="background:#16a34a"></span>可用</td>
+      <td>0</td>
+      <td>6/∞</td>
+      <td>25</td>
+      <td>0</td>
+      <td>0</td>
+      <td>2</td>
+      <td class="err"></td>
+    </tr><tr>
+      <td><code>mockC#1</code></td>
+      <td><code>MO***</code></td>
+      <td><code>grp1</code></td>
+      <td><span class="dot" style="background:#16a34a"></span>可用</td>
+      <td>0</td>
+      <td>0/2 (组)</td>
+      <td>1</td>
+      <td>0</td>
+      <td>0</td>
+      <td>2</td>
+      <td class="err"></td>
+    </tr><tr>
+      <td><code>mockC#2</code></td>
+      <td><code>MO***</code></td>
+      <td><code>grp1</code></td>
+      <td><span class="dot" style="background:#16a34a"></span>可用</td>
+      <td>0</td>
+      <td>0/2 (组)</td>
+      <td>1</td>
+      <td>0</td>
+      <td>0</td>
+      <td>2</td>
+      <td class="err"></td>
+    </tr></tbody></table>
+<div class="tip">
+  调用地址：<code>http://127.0.0.1:8787/v1/chat/completions</code>（OpenAI SDK 只需改 base_url）<br>
+  统计接口：<code>/stats</code> · 健康检查：<code>/health</code> · 修改 config.json 保存后自动热重载
+</div>
+</body></html>

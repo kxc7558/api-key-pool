@@ -1,0 +1,32 @@
+{
+  "host": "127.0.0.1",
+  "port": 8895,
+  "maxAttempts": 5,
+  "waitForSlotMs": 1000,
+  "cooldownMs": 1500,
+  "maxCooldownMs": 3000,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "info",
+  "breaker": { "enabled": false },
+  "halfOpen": { "enabled": false },
+  "alert": {
+    "enabled": true,
+    "email": { "to": "", "from": "代理池监控" },
+    "cooldownMs": 10000,
+    "allKeysDead": true,
+    "on429Streak": 1,
+    "onUserDailyExhausted": true
+  },
+  "accessKeys": {
+    "sk-alert-aaa": { "name": "告警用户A", "rpm": 1000, "daily": 2 }
+  },
+  "providers": [
+    { "name": "mockA", "baseUrl": "http://127.0.0.1:8899/v1", "keys": ["MOCK-A2"] },
+    { "name": "stuckP", "baseUrl": "http://127.0.0.1:8899/v1", "cooldownMs": 100, "keys": ["ALWAYS429"] }
+  ],
+  "models": {
+    "auto": [ { "provider": "mockA", "model": "mock-model" } ],
+    "stuck": [ { "provider": "stuckP", "model": "mock-model" } ]
+  }
+}
