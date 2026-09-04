@@ -1,0 +1,55 @@
+{
+  "host": "127.0.0.1",
+  "port": 8897,
+  "maxAttempts": 3,
+  "waitForSlotMs": 1000,
+  "cooldownMs": 1500,
+  "maxCooldownMs": 3000,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "info",
+  "breaker": {
+    "enabled": false
+  },
+  "halfOpen": {
+    "enabled": false
+  },
+  "alert": {
+    "enabled": true,
+    "email": {
+      "to": "hr@example.com",
+      "from": "代理池监控",
+      "account": "monitor@qq.com",
+      "authCode": "testcode123"
+    },
+    "cooldownMs": 10000,
+    "allKeysDead": true,
+    "on429Streak": 1,
+    "onUserDailyExhausted": true
+  },
+  "accessKeys": {
+    "sk-email-aaa": {
+      "name": "邮件用户A",
+      "rpm": 1000,
+      "daily": 2
+    }
+  },
+  "providers": [
+    {
+      "name": "mockA",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": [
+        "MOCK-A2"
+      ]
+    }
+  ],
+  "models": {
+    "auto": [
+      {
+        "provider": "mockA",
+        "model": "mock-model"
+      }
+    ]
+  },
+  "defaults": {}
+}

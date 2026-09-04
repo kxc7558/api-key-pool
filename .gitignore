@@ -1,0 +1,18 @@
+# 含明文 API Key，绝不能提交
+config.json
+keys*.txt
+
+# QA 临时产物
+qa_b.txt
+qa_h.txt
+tests/.pids.txt
+tests/.mock.log
+
+logs/
+reports/
+node_modules/
+*.log
+.DS_Store
+
+# WorkBuddy 项目内部数据（非源码）
+.workbuddy/

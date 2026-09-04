@@ -1,0 +1,28 @@
+{
+  "host": "127.0.0.1",
+  "port": 8896,
+  "maxAttempts": 5,
+  "waitForSlotMs": 1000,
+  "cooldownMs": 1500,
+  "maxCooldownMs": 3000,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "info",
+  "breaker": { "enabled": false },
+  "halfOpen": { "enabled": false },
+  "alert": {
+    "enabled": true,
+    "email": { "to": "", "from": "代理池监控" },
+    "cooldownMs": 10000,
+    "allKeysDead": true,
+    "on429Streak": 5,
+    "onUserDailyExhausted": true
+  },
+  "accessKeys": {},
+  "providers": [
+    { "name": "badP", "baseUrl": "http://127.0.0.1:8899/v1", "keys": ["BAD1"] }
+  ],
+  "models": {
+    "auto": [ { "provider": "badP", "model": "mock-model" } ]
+  }
+}

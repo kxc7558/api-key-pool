@@ -1,0 +1,28 @@
+{
+  "host": "127.0.0.1",
+  "port": 8893,
+  "maxAttempts": 5,
+  "waitForSlotMs": 1000,
+  "cooldownMs": 1500,
+  "maxCooldownMs": 3000,
+  "serverErrorCooldownMs": 400,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "info",
+  "breaker": { "enabled": true, "failThreshold": 2, "openMs": 2500 },
+  "halfOpen": { "enabled": false },
+  "logRetentionDays": 7,
+  "usageRetentionDays": 90,
+  "accessKeys": {
+    "sk-test-aaa": { "name": "测试调用方A", "rpm": 1000, "daily": 100000 },
+    "sk-test-bbb": { "name": "测试调用方B", "rpm": 1000, "daily": 100000 }
+  },
+  "providers": [
+    { "name": "mockA", "baseUrl": "http://127.0.0.1:8899/v1", "keys": ["MOCK-A2"] },
+    { "name": "stuckP", "baseUrl": "http://127.0.0.1:8899/v1", "cooldownMs": 100, "keys": ["ALWAYS429"] }
+  ],
+  "models": {
+    "auto": [ { "provider": "mockA", "model": "mock-model" } ],
+    "stuck": [ { "provider": "stuckP", "model": "mock-model" } ]
+  }
+}

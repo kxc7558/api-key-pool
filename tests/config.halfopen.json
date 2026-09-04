@@ -1,0 +1,45 @@
+{
+  "host": "127.0.0.1",
+  "port": 8892,
+  "maxAttempts": 8,
+  "waitForSlotMs": 1000,
+  "cooldownMs": 1200,
+  "maxCooldownMs": 4000,
+  "serverErrorCooldownMs": 400,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "warn",
+  "groupCooldownOn429": true,
+  "halfOpen": {
+    "enabled": true,
+    "probeIntervalMs": 400,
+    "probeTimeoutMs": 2000,
+    "probeMaxPerTick": 3,
+    "reviveDead": true,
+    "reviveDelayMs": 1000,
+    "probePath": "models",
+    "failBackoffMs": 1000
+  },
+  "breaker": { "enabled": true, "failThreshold": 3, "openMs": 2000 },
+  "defaults": { "rpmPerKey": 0, "maxConcurrencyPerKey": 0 },
+  "providers": [
+    {
+      "name": "hb",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": ["RATE2B", "OK1B"]
+    },
+    {
+      "name": "rev",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": ["REVIVE1"]
+    }
+  ],
+  "models": {
+    "hb": [
+      { "provider": "hb", "model": "mock-model" }
+    ],
+    "rev": [
+      { "provider": "rev", "model": "mock-model" }
+    ]
+  }
+}

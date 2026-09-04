@@ -1,0 +1,46 @@
+{
+  "host": "127.0.0.1",
+  "port": 8891,
+  "maxAttempts": 8,
+  "waitForSlotMs": 800,
+  "cooldownMs": 1500,
+  "maxCooldownMs": 4000,
+  "serverErrorCooldownMs": 400,
+  "requestTimeoutMs": 8000,
+  "strategy": "round-robin",
+  "logLevel": "warn",
+  "groupCooldownOn429": true,
+  "halfOpen": { "enabled": false },
+  "breaker": { "enabled": true, "failThreshold": 2, "openMs": 2500 },
+  "defaults": { "rpmPerKey": 0, "maxConcurrencyPerKey": 0 },
+  "providers": [
+    {
+      "name": "grpA",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": ["RATE2@acc", "OK1@acc"]
+    },
+    {
+      "name": "stuckP",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "cooldownMs": 150,
+      "keys": ["ALWAYS429"]
+    },
+    {
+      "name": "busyP",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "maxConcurrencyPerKey": 1,
+      "keys": ["SLOW1"]
+    }
+  ],
+  "models": {
+    "grp": [
+      { "provider": "grpA", "model": "mock-model" }
+    ],
+    "stuck": [
+      { "provider": "stuckP", "model": "mock-model" }
+    ],
+    "busy": [
+      { "provider": "busyP", "model": "mock-model" }
+    ]
+  }
+}
