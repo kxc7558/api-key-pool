@@ -75,7 +75,9 @@ http.createServer((req, res) => {
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
       for (const piece of content.match(/.{1,6}/g) || []) {
-        res.write(`data: ${JSON.stringify({ id: 'm', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] })}\n\n`);
+        // EMPTY_FINISH 模拟 SenseNova 的非标准中间分片：finish_reason=""（而非 OpenAI 标准 null）
+        const finishReason = auth === 'EMPTY_FINISH' ? '' : null;
+        res.write(`data: ${JSON.stringify({ id: 'm', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: piece }, finish_reason: finishReason }] })}\n\n`);
         await new Promise((r) => setTimeout(r, 20));
       }
       res.write('data: [DONE]\n\n');

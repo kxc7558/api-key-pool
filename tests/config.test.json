@@ -29,6 +29,12 @@
       "rpmPerKey": 0,
       "rpmPerAccount": 2,
       "keys": ["MOCK-C1@grp1", "MOCK-C2@grp1"]
+    },
+    {
+      "name": "mockStream",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "normalizeEmptyFinishReason": true,
+      "keys": ["EMPTY_FINISH"]
     }
   ],
   "models": {
@@ -38,6 +44,9 @@
     ],
     "grouped": [
       { "provider": "mockC", "model": "mock-model" }
+    ],
+    "empty-finish": [
+      { "provider": "mockStream", "model": "mock-model" }
     ]
   }
 }

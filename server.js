@@ -18,7 +18,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const tls = require('node:tls');
-const { Readable } = require('node:stream');
+const { Readable, Transform } = require('node:stream');
 
 // ---------------------------------------------------------------- 配置加载
 
@@ -490,9 +490,16 @@ class ApiKey {
     // 退避单元：连坐模式下用「组」累计连续失败，单 Key 模式用自身
     const unit = useGroup ? this.group : this;
     unit.failStreak = (unit.failStreak || 0) + 1;
+    // 冷却时长（借鉴 llm-keypool：429 优先听上游 Retry-After；
+    //   连续多次 429 且平台配了额度重置周期 → 直接冷却到重置周期，避免「额度用尽后指数退避到 10min 封顶、回池又立刻撞墙」；
+    //   普通瞬时限流才走指数退避）
+    const resetMs = this.provider.cooldownResetMs || 0;
+    const resetAfter = this.provider.cooldownResetAfter || 0;
     const base = retryAfterMs && retryAfterMs > 0
       ? Math.min(retryAfterMs, this.provider.maxCooldownMs) // S4：Retry-After 夹紧，防异常大值锁整组一天
-      : Math.min(this.provider.cooldownMs * Math.pow(2, unit.failStreak - 1), this.provider.maxCooldownMs);
+      : (resetMs > 0 && resetAfter > 0 && unit.failStreak >= resetAfter
+        ? resetMs
+        : Math.min(this.provider.cooldownMs * Math.pow(2, unit.failStreak - 1), this.provider.maxCooldownMs));
     const until = now + base;
     if (useGroup) {
       this.group.cooldownUntil = until; // 整组一起冷却
@@ -574,6 +581,9 @@ class Pool {
         authHeader: p.authHeader || 'Authorization',
         authPrefix: p.authPrefix !== undefined ? p.authPrefix : 'Bearer ',
         extraHeaders: p.extraHeaders || {},
+        // 有些 OpenAI 兼容上游（如 SenseNova）在中间 SSE 分片里发 finish_reason=""；
+        // 严格协议转换器（如 CC Switch 的 Anthropic 适配层）只接受 null/省略，按平台显式开启归一化。
+        normalizeEmptyFinishReason: p.normalizeEmptyFinishReason === true,
         rpmPerKey: p.rpmPerKey != null ? p.rpmPerKey : (d.rpmPerKey != null ? d.rpmPerKey : 0),
         rpmPerAccount: p.rpmPerAccount != null ? p.rpmPerAccount : (d.rpmPerAccount != null ? d.rpmPerAccount : 0),
         maxConcurrencyPerKey: p.maxConcurrencyPerKey != null ? p.maxConcurrencyPerKey : (d.maxConcurrencyPerKey != null ? d.maxConcurrencyPerKey : 0),
@@ -581,6 +591,9 @@ class Pool {
         cooldownMs: p.cooldownMs != null ? p.cooldownMs : cfg.cooldownMs,
         maxCooldownMs: p.maxCooldownMs != null ? p.maxCooldownMs : cfg.maxCooldownMs,
         serverErrorCooldownMs: p.serverErrorCooldownMs != null ? p.serverErrorCooldownMs : cfg.serverErrorCooldownMs,
+        // 额度重置周期（借鉴 llm-keypool 的冷却回退策略）：连续 cooldownResetAfter 次 429 后，冷却直接对齐该周期
+        cooldownResetMs: p.cooldownResetMs != null ? p.cooldownResetMs : 0,
+        cooldownResetAfter: p.cooldownResetAfter != null ? p.cooldownResetAfter : 0,
         // 连坐冷却可平台级覆盖：p.groupCooldownOn429 ?? 全局（默认 true）
         groupCooldownOn429: p.groupCooldownOn429 != null ? p.groupCooldownOn429 : (cfg.groupCooldownOn429 !== false),
         keys: [],
@@ -1191,14 +1204,64 @@ async function attempt(slot, bodyObj, isStream, clientHeaders, abortSignal) {
   }
 }
 
+function normalizeSseLine(line) {
+  if (!line.startsWith('data: ') || line === 'data: [DONE]') return line;
+  try {
+    const event = JSON.parse(line.slice(6));
+    let changed = false;
+    for (const choice of event.choices || []) {
+      if (choice && choice.finish_reason === '') {
+        choice.finish_reason = null;
+        changed = true;
+      }
+    }
+    return changed ? `data: ${JSON.stringify(event)}` : line;
+  } catch (_) {
+    return line; // 非 JSON SSE 事件原样透传
+  }
+}
+
+/**
+ * 将非标准 SSE 的 finish_reason="" 归一为 OpenAI 标准 null。
+ * 逐行缓冲以处理 TCP/Fetch chunk 恰好切在 SSE 行中间的情况；非 data 行及 [DONE] 不改。
+ */
+function createFinishReasonNormalizer() {
+  let pending = '';
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      pending += chunk.toString('utf8');
+      let newline;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const raw = pending.slice(0, newline + 1);
+        pending = pending.slice(newline + 1);
+        const line = raw.endsWith('\r\n') ? raw.slice(0, -2) : raw.slice(0, -1);
+        const ending = raw.endsWith('\r\n') ? '\r\n' : '\n';
+        this.push(`${normalizeSseLine(line)}${ending}`);
+      }
+      callback();
+    },
+    flush(callback) {
+      if (pending) this.push(normalizeSseLine(pending));
+      callback();
+    },
+  });
+}
+
 /** 把上游响应转发给客户端（流式 / 非流式统一处理）。返回 { usage } 供调用日志记 token（流式拿不到，为 null） */
 async function relay(resp, res, isStream, abortSignal, slot, attemptNo, userName) {
   const headers = buildResponseHeaders(resp, slot, attemptNo, userName);
   if (isStream) {
     res.writeHead(resp.status, headers);
-    const nodeStream = Readable.fromWeb(resp.body);
-    let idleTimer = setTimeout(() => nodeStream.destroy(new Error('stream idle timeout')), CONFIG.streamIdleTimeoutMs);
-    const reset = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => nodeStream.destroy(new Error('stream idle timeout')), CONFIG.streamIdleTimeoutMs); };
+    const upstreamStream = Readable.fromWeb(resp.body);
+    const nodeStream = slot.target.provider.normalizeEmptyFinishReason
+      ? upstreamStream.pipe(createFinishReasonNormalizer())
+      : upstreamStream;
+    const destroyStreams = () => {
+      upstreamStream.destroy();
+      if (nodeStream !== upstreamStream) nodeStream.destroy();
+    };
+    let idleTimer = setTimeout(() => destroyStreams(), CONFIG.streamIdleTimeoutMs);
+    const reset = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => destroyStreams(), CONFIG.streamIdleTimeoutMs); };
     nodeStream.on('data', reset);
     await new Promise((resolve) => {
       let done = false;
@@ -1206,9 +1269,9 @@ async function relay(resp, res, isStream, abortSignal, slot, attemptNo, userName
       nodeStream.on('end', finish);
       nodeStream.on('close', finish);
       nodeStream.on('error', () => { try { res.end(); } catch (_) {} finish(); });
-      if (abortSignal) abortSignal.addEventListener('abort', () => nodeStream.destroy(), { once: true });
+      if (abortSignal) abortSignal.addEventListener('abort', destroyStreams, { once: true });
       nodeStream.pipe(res);
-      res.on('close', () => nodeStream.destroy());
+      res.on('close', destroyStreams);
     });
     return { usage: null };
   }
@@ -1269,17 +1332,46 @@ async function handleChat(req, res, bodyObj) {
 
     let slot = POOL.pick(targets, CONFIG.strategy);
     if (!slot) {
-      // 全部 Key 都在冷却/占满/待验证 —— 排队等一会儿，而不是立刻失败
-      if (!waited) { log('warn', `所有 Key 均不可用，进入排队等待（最长 ${CONFIG.waitForSlotMs / 1000}s）`, 'yellow'); waited = true; }
-      // 等待期间促发一次探活（若队列里有「冷却到期待验证」的 Key，让它们尽快回池）
-      if (CONFIG.halfOpen && CONFIG.halfOpen.enabled !== false && !probeRunning) {
-        probeRunning = true;
-        probeTick().finally(() => { probeRunning = false; });
-      }
-      while (!slot && Date.now() < deadline) {
-        await sleep(120);
-        if (aborted) return;
-        slot = POOL.pick(targets, CONFIG.strategy);
+      // 全部 Key 都不可用。区分两种情况：
+      // - 冷却/额度用尽/待探活：waitMs 给出明确的等待时长，可能远超排队预算——等不到就别傻等，快速失败（503 会带 retry-after）；
+      // - 忙碌中（inflight 占满）：waitMs 为 0，短等待轮询即可，等流式请求释放。
+      // 降级兜底（借鉴 one-api 的 ignoreFirstPriority）：主力长时间等不到时，主动降级到 fallback 候选，
+      //   而不是干等到超时——保可用性优先（兜底慢但能回，总比 503 强）。
+      const fbTargets = targets.filter((t) => t.fallback);
+      const tryPick = () => POOL.pick(targets, CONFIG.strategy);
+      const tryFallback = () => (fbTargets.length ? POOL.pickFrom(fbTargets, CONFIG.strategy) : null);
+
+      const minWait = POOL.minWaitMs(targets);
+      const remain = deadline - Date.now();
+      if (Number.isFinite(minWait) && minWait > 0) {
+        if (minWait > remain) {
+          // 主力预算内等不到：先降级试兜底，兜底也没有才快速失败
+          slot = tryFallback();
+          if (slot) log('warn', `主力近期无法恢复，降级到兜底：${slot.key.label}`, 'yellow');
+          if (!slot) break;
+        } else {
+          if (!waited) { log('warn', `所有 Key 均不可用，最近约 ${Math.ceil(minWait / 1000)}s 后可恢复，等待 ${Math.ceil(minWait / 1000)}s`, 'yellow'); waited = true; }
+          await sleep(Math.min(minWait, remain));
+          if (aborted) return;
+          slot = tryPick();
+        }
+      } else {
+        if (!waited) { log('warn', `所有 Key 均忙，进入排队等待（最长 ${CONFIG.waitForSlotMs / 1000}s）`, 'yellow'); waited = true; }
+        // 等待期间促发一次探活（若队列里有「冷却到期待验证」的 Key，让它们尽快回池）
+        if (CONFIG.halfOpen && CONFIG.halfOpen.enabled !== false && !probeRunning) {
+          probeRunning = true;
+          probeTick().finally(() => { probeRunning = false; });
+        }
+        const degradeAt = Date.now() + (CONFIG.waitForSlotMs >> 1); // 排队预算过半还没等到 → 降级兜底
+        while (!slot && Date.now() < deadline) {
+          await sleep(120);
+          if (aborted) return;
+          slot = tryPick();
+          if (!slot && Date.now() >= degradeAt) {
+            slot = tryFallback();
+            if (slot) log('warn', `主力排队 ${Math.ceil((Date.now() - (deadline - CONFIG.waitForSlotMs)) / 1000)}s 未释放，降级到兜底：${slot.key.label}`, 'yellow');
+          }
+        }
       }
       if (!slot) break;
       log('info', `等到可用 Key：${slot.key.label}`, 'green');
