@@ -108,9 +108,16 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | 别名 | 主力 | 兜底（fallback） | 说明 |
 |---|---|---|---|
 | `auto` | 商汤 `deepseek-v4-flash` / `deepseek-v4-pro` 轮询 | 英伟达 `deepseek-v4-pro-0813` | 默认；商汤全限流时才等 1~2 分钟走兜底 |
-| `pro` | 商汤 `deepseek-v4-pro` | 英伟达 `deepseek-v4-pro-0813` | DeepSeek 旗舰推理 |
-| `flash` | 商汤 `deepseek-v4-flash` | — | 快速版，日常问答 |
+| `pro` | 商汤 `deepseek-v4-pro` | ModelScope `DeepSeek-V4-Pro` → 英伟达 | DeepSeek 旗舰推理；ModelScope 兜底比英伟达（56~113s 冷启动）快得多 |
+| `flash` | 商汤 `deepseek-v4-flash` | ModelScope `Qwen3.8-Flash-Next` → OpenRouter `nemotron-3-super` | 快速版，日常问答 |
 | `kimi` | 商汤 `kimi-k3` | — | Kimi K3，支持图片输入；英伟达侧 kimi-k3 实测完全调度不出来（2026-09-02 验证，参数无关） |
+| `lite` | 商汤 `sensenova-6.8-flash-lite` | — | 商汤免费档里额度最耐用的一款（1500 次/5h，是 deepseek 系列的 3 倍） |
+| `qwen` | ModelScope `Qwen/Qwen3.8-Flash-Next` | — | 魔搭免费额度，实测秒回，适合日常问答 |
+| `free` | OpenRouter 三个免费模型轮询 | — | 每日限次数（约 50 次/模型），用尽自动冷却 |
+
+> ⚠️ **OpenRouter 免费模型不支持工具调用**（实测把参数当正文输出），不能作为 Claude Code 等代理式工具场景的兜底。
+
+> 🧪 **ModelScope 平台实测备注（2026-09-07）**：`Qwen/Qwen3.8-Flash-Next` 与 `deepseek-ai/DeepSeek-V4-Pro` 可用；`DeepSeek-V4-Flash-0731`、`ZhipuAI/GLM-4.7-Flash`、`GLM-5.2` 平台侧返回空响应（`choices:null`），`GLM-5.3-Flash` 挂起 60s 无响应且不在模型列表（灰度中）——这些勿加入模型池，等平台修复后重测。
 
 > ⚠️ **别把慢速上游当普通候选**：候选数组是轮询均分，夹一个冷启动 1~2 分钟的英伟达进去，1/3 的请求就会集体变慢。慢上游必须标 `fallback: true`。
 
