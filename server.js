@@ -40,6 +40,7 @@ const DEFAULT_CONFIG = {
   strategy: 'round-robin',  // round-robin | least-used
   logLevel: 'info',         // debug | info | warn | error | silent
   adminToken: '',           // 操作台远程管理密码；留空 = 仅本机可管理
+  collabTokens: {},         // 协同管理员：{ "token": "名字" } —— 可上传上游 Key / 生成分发 Key，不可改其他配置
   exposePassthrough: false, // /v1/models 是否列出 "平台名:__passthrough__" 占位项（默认关：它不可调用，客户端误选会报错）
   groupCooldownOn429: true, // 连坐冷却：同账号分组内任意一个 Key 触发 429，整组一起冷却（账号级限流，避免逐个白试）
   // —— 半开探测（half-open）——
@@ -1620,6 +1621,97 @@ function adminAllowed(req) {
   return token === t;
 }
 
+/** 从请求里提取 Bearer token（无前缀也接受，与 adminAllowed 一致） */
+function extractBearer(req) {
+  const auth = String(req.headers.authorization || '');
+  return auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim();
+}
+
+/** 协同管理员：collabTokens 里登记的 token。可上传上游 Key、生成分发 Key，不可改其他配置 */
+function resolveCollab(req) {
+  const collab = CONFIG.collabTokens;
+  if (!collab || typeof collab !== 'object' || Array.isArray(collab)) return null;
+  const t = extractBearer(req);
+  if (!t) return null;
+  const name = collab[t];
+  if (!name) return null;
+  return { token: t, name: String(name) };
+}
+
+function genRandomToken(len = 32) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+/**
+ * 协同管理员接口（受限写操作，管理员接口不受影响）：
+ *   POST /admin/api/collab/keys        { provider, keys: [...] }        往指定平台追加上游 Key
+ *   POST /admin/api/collab/accessKeys  { name, rpm?, daily?, count? }   生成分发 Key（默认 1 个）
+ * 只允许操作白名单字段；写盘后走同一套原子写+热重载。
+ */
+async function handleCollabApi(req, res, url, collab) {
+  const action = url.pathname.replace(/^\/admin\/api\/collab\//, '');
+  // 读取当前盘上配置（不走内存 CONFIG，避免和操作台并发保存互相覆盖）
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  } catch (e) {
+    return sendJson(res, 500, { error: { message: '读取配置失败：' + e.message, type: 'internal_error' } });
+  }
+  if (!raw.accessKeys || typeof raw.accessKeys !== 'object') raw.accessKeys = {};
+
+  const save = () => {
+    const json = JSON.stringify(raw, null, 2);
+    const tmp = CONFIG_PATH + '.tmp';
+    fs.writeFileSync(tmp, json, 'utf8');
+    try { fs.renameSync(tmp, CONFIG_PATH); }
+    catch (e) { fs.writeFileSync(CONFIG_PATH, json, 'utf8'); try { fs.unlinkSync(tmp); } catch (_) {} }
+    reloadConfig();
+  };
+
+  if (req.method === 'POST' && action === 'keys') {
+    const body = JSON.parse((await readBody(req, 1024 * 1024)).toString('utf8') || '{}');
+    const providerName = String(body.provider || '').trim();
+    const keys = Array.isArray(body.keys) ? body.keys.map((k) => String(k).trim()).filter(Boolean) : [];
+    if (!providerName || !keys.length) return sendJson(res, 400, { error: { message: '需要 provider 和 keys 数组', type: 'invalid_request_error' } });
+    const p = (raw.providers || []).find((x) => x && x.name === providerName);
+    if (!p) return sendJson(res, 404, { error: { message: `平台「${providerName}」不存在`, type: 'not_found' } });
+    if (!Array.isArray(p.keys)) p.keys = [];
+    const existing = new Set(p.keys.map((k) => k.split('@')[0]));
+    const added = [], skipped = [];
+    for (const k of keys) {
+      const base = k.split('@')[0];
+      if (existing.has(base)) { skipped.push(base.slice(0, 8) + '…'); continue; }
+      p.keys.push(k); existing.add(base); added.push(base.slice(0, 8) + '…');
+    }
+    if (added.length) save();
+    log('info', `协同管理员「${collab.name}」向 ${providerName} 追加 ${added.length} 个上游 Key（跳过重复 ${skipped.length}）`, 'magenta');
+    return sendJson(res, 200, { ok: true, added: added.length, skipped: skipped.length, providerKeys: p.keys.length });
+  }
+
+  if (req.method === 'POST' && action === 'accessKeys') {
+    const body = JSON.parse((await readBody(req, 1024 * 1024)).toString('utf8') || '{}');
+    const count = Math.min(Math.max(parseInt(body.count, 10) || 1, 1), 20);
+    const name = String(body.name || '协同用户').slice(0, 40);
+    const rpm = Math.min(Math.max(parseInt(body.rpm, 10) || 10, 1), 600);
+    const daily = Math.min(Math.max(parseInt(body.daily, 10) || 300, 1), 100000);
+    const created = [];
+    for (let i = 0; i < count; i++) {
+      const key = 'sk-pool-' + genRandomToken();
+      const finalName = count > 1 ? `${name}${i + 1}` : name;
+      raw.accessKeys[key] = { name: finalName, rpm, daily };
+      created.push({ key, name: finalName, rpm, daily });
+    }
+    save();
+    log('info', `协同管理员「${collab.name}」创建 ${count} 个分发 Key（${name}，${rpm}RPM/日${daily}）`, 'magenta');
+    return sendJson(res, 200, { ok: true, created });
+  }
+
+  return sendJson(res, 404, { error: { message: `协同管理不支持的操作 ${action}`, type: 'not_found' } });
+}
+
 function handleAdminPage(res) {
   const fp = path.join(ROOT, 'admin.html');
   let buf;
@@ -1953,6 +2045,20 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/api/usage' && req.method === 'GET') {
       if (!adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: CONFIG.adminToken ? '管理密码错误' : '操作台仅限本机访问（或先设置 adminToken 开启远程管理）', type: 'auth_error' } });
       return handleAdminUsage(res, url);
+    }
+
+    // 协同管理员接口：collabTokens 登记的 token 专用（管理员 token 也可调用）
+    if (p.startsWith('/admin/api/collab/')) {
+      let collab = resolveCollab(req);
+      if (!collab && adminAllowed(req)) collab = { token: '(admin)', name: '管理员' };
+      if (!collab) return sendJson(res, 401, { needAuth: true, error: { message: '需要协同管理员 token 或 adminToken', type: 'auth_error' } });
+      if (p === '/admin/api/collab/whoami' && req.method === 'GET') {
+        const providers = (POOL.providers instanceof Map)
+          ? [...POOL.providers.values()].map((pr) => ({ name: pr.name, keyCount: pr.keys.length }))
+          : [];
+        return sendJson(res, 200, { ok: true, name: collab.name, providers });
+      }
+      return await handleCollabApi(req, res, url, collab);
     }
 
     if ((p === '/v1/chat/completions' || p === '/chat/completions') && req.method === 'POST') {

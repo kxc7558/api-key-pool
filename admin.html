@@ -198,6 +198,8 @@
     <button data-tab="providers"><svg class="ic"><use href="#i-key"/></svg>密钥管理</button>
     <button data-tab="models"><svg class="ic"><use href="#i-layers"/></svg>模型</button>
     <button data-tab="access"><svg class="ic"><use href="#i-link"/></svg>对接密钥</button>
+    <button data-tab="collab-keys" style="display:none"><svg class="ic"><use href="#i-key"/></svg>放 Key 入池</button>
+    <button data-tab="collab-access" style="display:none"><svg class="ic"><use href="#i-link"/></svg>生成用户Key</button>
     <button data-tab="logs"><svg class="ic"><use href="#i-list"/></svg>使用记录</button>
     <button data-tab="usage"><svg class="ic"><use href="#i-chart"/></svg>用量统计</button>
     <button data-tab="settings"><svg class="ic"><use href="#i-gear"/></svg>设置</button>
@@ -240,6 +242,7 @@
 let cfg = null;              // 完整 config 副本（从 /admin/api/config 读）
 let stats = null;
 let token = localStorage.getItem('akp_admin_token') || '';
+let role = 'admin';          // 'admin' | 'collab'
 let dirty = false;
 let currentTab = 'home';
 let accessRows = [];         // 分发 Key 编辑中间层：[{key,name,rpm,daily}]
@@ -1059,16 +1062,119 @@ document.getElementById('modal-ok').addEventListener('click', async ()=>{
   token = pwd;
   const r = await fetch('/admin/api/config', { headers:{ authorization:'Bearer '+pwd } });
   if (r.status === 200){
+    role = 'admin';
     localStorage['akp_admin_token'] = pwd;
     closeModal();
     await loadConfig(); loadStats();
   } else {
-    token = '';
-    document.getElementById('modal-err').style.display='block';
+    // 不是 adminToken —— 试协同管理员身份
+    const cr = await fetch('/admin/api/collab/whoami', { headers:{ authorization:'Bearer '+pwd } });
+    if (cr.status === 200){
+      role = 'collab';
+      localStorage['akp_admin_token'] = pwd;
+      try { collabProviders = (await cr.json()).providers || []; } catch(_) {}
+      closeModal();
+      applyRoleUI();
+      toast('已登录（协同管理员）', 'ok');
+    } else {
+      token = '';
+      document.getElementById('modal-err').style.display='block';
+    }
   }
 });
+
+/* 协同管理员：精简界面（只保留 放上游Key / 生成用户Key 两个功能） */
+function applyRoleUI(){
+  if (role !== 'collab') return;
+  document.querySelectorAll('#nav [data-tab]').forEach(b=>{
+    const t = b.dataset.tab;
+    if (t !== 'collab-keys' && t !== 'collab-access') b.style.display = 'none';
+  });
+  // 顶栏保存/刷新按钮对协同管理员隐藏（他们的操作即时生效，无草稿态）
+  document.getElementById('btn-save').style.display = 'none';
+  const rl = document.getElementById('btn-reload'); if (rl) rl.style.display = 'none';
+  currentTab = 'collab-keys';
+  document.querySelectorAll('#nav [data-tab]').forEach(b=>b.classList.toggle('active', b.dataset.tab==='collab-keys'));
+  renderCollab();
+}
+function genPoolKey(){ const c='abcdefghijklmnopqrstuvwxyz0123456789'; let s=''; for(let i=0;i<32;i++) s+=c[Math.floor(Math.random()*c.length)]; return 'sk-pool-'+s; }
+
+let collabProviders = [];   // [{name, keyCount}]
+let collabLastCreated = [];
+
+async function collabApi(method, path, body){
+  const resp = await fetch(path, { method, headers:{ 'content-type':'application/json', authorization:'Bearer '+token }, body: body?JSON.stringify(body):undefined });
+  const data = await resp.json().catch(()=>({}));
+  if (resp.status === 401 && data.needAuth){ promptPassword(); throw new Error('NEED_AUTH'); }
+  if (!resp.ok) throw new Error(data.error && data.error.message || ('HTTP '+resp.status));
+  return data;
+}
+
+async function renderCollab(){
+  const main = document.getElementById('main');
+  if (currentTab === 'collab-keys'){
+    let opts = collabProviders.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}（${p.keyCount} keys）</option>`).join('');
+    main.innerHTML = `
+    <div class="box" style="max-width:640px">
+      <h3>上传上游 Key</h3>
+      <div class="sub">把新的平台 Key 追加到池子里。自动跳过重复 Key。</div>
+      <div class="field"><label>平台</label><select class="f" id="ck-provider">${opts}</select></div>
+      <div class="field"><label>Key 列表（一行一个，可带 @账号标签）</label>
+        <textarea class="f mono" id="ck-keys" rows="6" placeholder="sk-xxxx&#10;sk-yyyy@账号2"></textarea></div>
+      <button class="btn primary" id="ck-submit">追加到池子</button>
+      <div class="hint" id="ck-result" style="margin-top:10px"></div>
+    </div>`;
+    document.getElementById('ck-submit').addEventListener('click', async ()=>{
+      const provider = document.getElementById('ck-provider').value;
+      const keys = document.getElementById('ck-keys').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      if (!keys.length) return toast('请先粘贴 Key', 'err');
+      try {
+        const r = await collabApi('POST', '/admin/api/collab/keys', { provider, keys });
+        document.getElementById('ck-result').textContent = `已追加 ${r.added} 个，跳过重复 ${r.skipped} 个，该平台现有 ${r.providerKeys} 个 Key`;
+        document.getElementById('ck-keys').value = '';
+        toast('上游 Key 已入池', 'ok');
+      } catch(e){ toast('失败：'+e.message, 'err'); }
+    });
+  } else if (currentTab === 'collab-access'){
+    main.innerHTML = `
+    <div class="box" style="max-width:640px">
+      <h3>生成用户 Key</h3>
+      <div class="sub">创建分发给使用者的调用密钥，即时生效。</div>
+      <div class="field"><label>用户名</label><input class="f" id="ca-name" value="用户" placeholder="显示在用量统计里"></div>
+      <div class="row" style="gap:12px">
+        <div class="field" style="flex:1"><label>每分钟上限</label><input class="f" id="ca-rpm" type="number" value="10"></div>
+        <div class="field" style="flex:1"><label>每天上限</label><input class="f" id="ca-daily" type="number" value="300"></div>
+        <div class="field" style="flex:1"><label>生成数量</label><input class="f" id="ca-count" type="number" value="1" min="1" max="20"></div>
+      </div>
+      <button class="btn primary" id="ca-submit">生成</button>
+      <div id="ca-result" style="margin-top:14px"></div>
+    </div>`;
+    document.getElementById('ca-submit').addEventListener('click', async ()=>{
+      const body = {
+        name: document.getElementById('ca-name').value.trim() || '用户',
+        rpm: parseInt(document.getElementById('ca-rpm').value,10) || 10,
+        daily: parseInt(document.getElementById('ca-daily').value,10) || 300,
+        count: parseInt(document.getElementById('ca-count').value,10) || 1,
+      };
+      try {
+        const r = await collabApi('POST', '/admin/api/collab/accessKeys', body);
+        collabLastCreated = r.created;
+        document.getElementById('ca-result').innerHTML = r.created.map(c=>
+          `<div class="box" style="margin-bottom:8px"><div class="mono" style="user-select:all;word-break:break-all">${esc(c.key)}</div><div class="hint">${esc(c.name)} · ${c.rpm} RPM/日 ${c.daily} 次</div></div>`).join('');
+        toast(`已生成 ${r.created.length} 个 Key`, 'ok');
+      } catch(e){ toast('失败：'+e.message, 'err'); }
+    });
+  }
+}
 document.getElementById('modal-cancel').addEventListener('click', closeModal);
 document.getElementById('modal-pwd').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('modal-ok').click(); });
+
+/* tab 切换：协同管理员页签走独立渲染 */
+document.getElementById('nav').addEventListener('click', (e)=>{
+  const b = e.target.closest('[data-tab]'); if(!b) return;
+  const t = b.dataset.tab;
+  if (t === 'collab-keys' || t === 'collab-access'){ currentTab = t; renderCollab(); }
+});
 
 /* ================= 启动 ================= */
 (async function init(){
