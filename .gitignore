@@ -1,5 +1,6 @@
 # 含明文 API Key，绝不能提交
 config.json
+users.json
 keys*.txt
 
 # QA 临时产物

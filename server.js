@@ -1724,6 +1724,178 @@ function handleAdminPage(res) {
   res.end(buf);
 }
 
+// ---------------------------------------------------------------- 用户账号体系（网站地基）
+
+const crypto = require('node:crypto');
+const USERS_PATH = path.join(ROOT, 'users.json');
+const USERS = { byName: new Map(), byId: new Map() };        // name -> user, id -> user
+const SESSIONS = new Map();                                  // sid -> { userId, name, role, createdAt }
+const CAPTCHAS = new Map();                                  // cid -> { text, expiresAt }
+const COOKIE_NAME = 'akp_session';
+
+function hashPassword(password, salt) {
+  salt = salt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 32).toString('hex');
+  return { salt, hash };
+}
+function verifyPassword(password, salt, expectHash) {
+  try {
+    const h = crypto.scryptSync(String(password), salt, 32).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(expectHash, 'hex'));
+  } catch (_) { return false; }
+}
+function loadUsers() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(USERS_PATH, 'utf8'));
+    for (const u of arr) { USERS.byName.set(u.name, u); USERS.byId.set(u.id, u); }
+    if (arr.length) log('info', `用户账号已载入：${arr.length} 个`, 'green');
+  } catch (_) { /* 首次启动无用户文件 */ }
+}
+function saveUsers() {
+  fs.writeFileSync(USERS_PATH, JSON.stringify([...USERS.byId.values()], null, 2), 'utf8');
+}
+loadUsers();
+
+/** 每 5 分钟清理过期会话与验证码 */
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, s] of SESSIONS) if (now - s.createdAt > 7 * 86400000) SESSIONS.delete(sid);
+  for (const [cid, c] of CAPTCHAS) if (c.expiresAt < now) CAPTCHAS.delete(cid);
+}, 5 * 60000);
+
+function parseCookies(req) {
+  const out = {};
+  const raw = String(req.headers.cookie || '');
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+function currentUser(req) {
+  const sid = parseCookies(req)[COOKIE_NAME];
+  if (!sid) return null;
+  const s = SESSIONS.get(sid);
+  if (!s) return null;
+  const u = USERS.byId.get(s.userId);
+  if (!u) return null;
+  return { sid, user: u };
+}
+
+/** SVG 图形验证码（零依赖：噪声线 + 随机旋转缩放的 text 元素，参照 svg-captcha 的思路） */
+function makeCaptcha() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉易混淆的 I/1/O/0
+  let text = '';
+  for (let i = 0; i < 4; i++) text += chars[Math.floor(Math.random() * chars.length)];
+  const W = 132, H = 44;
+  let paths = '';
+  for (let i = 0; i < 4; i++) {
+    const x = 14 + i * 28 + Math.floor(Math.random() * 8);
+    const y = 30 + Math.floor(Math.random() * 6);
+    const rot = Math.floor(Math.random() * 40) - 20;
+    const size = 24 + Math.floor(Math.random() * 8);
+    const g = 90 + Math.floor(Math.random() * 120);
+    paths += `<text x="${x}" y="${y}" font-size="${size}" fill="rgb(${g},${g},${g})" transform="rotate(${rot} ${x} ${y})" font-family="Arial,Georgia,serif" font-weight="bold">${text[i]}</text>`;
+  }
+  for (let i = 0; i < 4; i++) {
+    const g = 120 + Math.floor(Math.random() * 100);
+    paths += `<path d="M${Math.random() * 20} ${Math.random() * H} C${W / 3} ${Math.random() * H},${W * 2 / 3} ${Math.random() * H},${W - Math.random() * 20} ${Math.random() * H}" stroke="rgb(${g},${g},${g})" fill="none"/>`;
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0,0,${W},${H}"><rect width="100%" height="100%" fill="#f2f3f7"/>${paths}</svg>`;
+  return { text, svg };
+}
+
+function handleStaticFile(res, file, type) {
+  const fp = path.join(ROOT, file);
+  let buf;
+  try { buf = fs.readFileSync(fp); } catch (e) { return sendJson(res, 404, { error: { message: `${file} 缺失`, type: 'not_found' } }); }
+  res.writeHead(200, { 'content-type': type + '; charset=utf-8', 'content-length': buf.length, 'cache-control': 'no-cache' });
+  res.end(buf);
+}
+
+function handleAuthApi(req, res, p) {
+  return (async () => {
+    let body = {};
+    if (req.method === 'POST') {
+      try { body = JSON.parse((await readBody(req, 512 * 1024)).toString('utf8') || '{}'); } catch (_) { body = {}; }
+    }
+
+    if (p === '/api/auth/captcha' && req.method === 'GET') {
+      const cid = crypto.randomBytes(12).toString('hex');
+      const { text, svg } = makeCaptcha();
+      CAPTCHAS.set(cid, { text: text.toLowerCase(), expiresAt: Date.now() + 5 * 60000 });
+      res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'x-captcha-id': cid, 'cache-control': 'no-store' });
+      return res.end(svg);
+    }
+
+    if (p === '/api/auth/register' && req.method === 'POST') {
+      const { name, password, captchaId, captchaText } = body;
+      if (!name || String(name).length < 2 || String(name).length > 24) return sendJson(res, 400, { error: { message: '用户名需 2~24 个字符', type: 'invalid_request_error' } });
+      if (!/^[a-zA-Z0-9_一-龥]+$/.test(name)) return sendJson(res, 400, { error: { message: '用户名只能包含中英文、数字、下划线', type: 'invalid_request_error' } });
+      if (!password || String(password).length < 6) return sendJson(res, 400, { error: { message: '密码至少 6 位', type: 'invalid_request_error' } });
+      const cap = CAPTCHAS.get(String(captchaId || ''));
+      if (!cap || cap.expiresAt < Date.now()) return sendJson(res, 400, { error: { message: '验证码已过期，请刷新', type: 'captcha_error' } });
+      if (String(captchaText || '').toLowerCase() !== cap.text) { CAPTCHAS.delete(String(captchaId || '')); return sendJson(res, 400, { error: { message: '验证码错误', type: 'captcha_error' } }); }
+      CAPTCHAS.delete(String(captchaId || ''));
+      if (USERS.byName.has(name)) return sendJson(res, 409, { error: { message: '用户名已存在', type: 'conflict' } });
+      const { salt, hash } = hashPassword(password);
+      const user = { id: crypto.randomBytes(8).toString('hex'), name, salt, hash, role: 'user', createdAt: Date.now() };
+      USERS.byName.set(name, user); USERS.byId.set(user.id, user); saveUsers();
+      const sid = crypto.randomBytes(16).toString('hex');
+      SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
+      log('info', `新用户注册：${name}`, 'green');
+      res.setHeader('set-cookie', `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
+      return sendJson(res, 200, { ok: true, name: user.name, role: user.role });
+    }
+
+    if (p === '/api/auth/login' && req.method === 'POST') {
+      const { name, password, captchaId, captchaText } = body;
+      const cap = CAPTCHAS.get(String(captchaId || ''));
+      if (!cap || cap.expiresAt < Date.now()) return sendJson(res, 400, { error: { message: '验证码已过期，请刷新', type: 'captcha_error' } });
+      if (String(captchaText || '').toLowerCase() !== cap.text) { CAPTCHAS.delete(String(captchaId || '')); return sendJson(res, 400, { error: { message: '验证码错误', type: 'captcha_error' } }); }
+      CAPTCHAS.delete(String(captchaId || ''));
+      const user = USERS.byName.get(String(name || ''));
+      if (!user || !verifyPassword(password, user.salt, user.hash)) return sendJson(res, 401, { error: { message: '用户名或密码错误', type: 'auth_error' } });
+      const sid = crypto.randomBytes(16).toString('hex');
+      SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
+      res.setHeader('set-cookie', `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
+      return sendJson(res, 200, { ok: true, name: user.name, role: user.role });
+    }
+
+    if (p === '/api/auth/logout' && req.method === 'POST') {
+      const sid = parseCookies(req)[COOKIE_NAME];
+      if (sid) SESSIONS.delete(sid);
+      res.setHeader('set-cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (p === '/api/auth/me' && req.method === 'GET') {
+      const cur = currentUser(req);
+      if (!cur) return sendJson(res, 401, { error: { message: '未登录', type: 'auth_error' } });
+      return sendJson(res, 200, { name: cur.user.name, role: cur.user.role, createdAt: cur.user.createdAt });
+    }
+
+    // 登录用户：查看自己的分发 Key 与用量（按用户名与 accessKeys 里的 name 匹配）
+    if (p === '/api/portal/mykeys' && req.method === 'GET') {
+      const cur = currentUser(req);
+      if (!cur) return sendJson(res, 401, { error: { message: '未登录', type: 'auth_error' } });
+      const mine = [];
+      for (const [token, spec] of Object.entries(CONFIG.accessKeys || {})) {
+        const name = typeof spec === 'string' ? spec : (spec && spec.name) || '';
+        const mask = token.slice(0, 11) + '…' + token.slice(-4);
+        if (name === cur.user.name) {
+          const full = typeof spec === 'object' ? spec : {};
+          mine.push({ keyMasked: mask, key: token, name, rpm: full.rpm || 0, daily: full.daily || 0 });
+        }
+      }
+      const u = [...(accessUsers.values())].find((x) => x.name === cur.user.name);
+      return sendJson(res, 200, { keys: mine, usage: u ? { today: u.dailyCount, total: u.totalCalls, lastCallAt: u.lastCallAt } : { today: 0, total: 0, lastCallAt: null } });
+    }
+
+    return sendJson(res, 404, { error: { message: `不支持的认证路由 ${p}`, type: 'not_found' } });
+  })();
+}
+
 function handleAdminGetConfig(res) {
   let raw;
   try {
@@ -2020,9 +2192,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 设置 adminToken 后，/stats 与 /（仪表盘）也要求管理鉴权（本机免密 / 远程 Bearer），防止公网暴露统计
-    if (p === '/' && req.method === 'GET') {
+    // 门户首页（网站地基）
+    if ((p === '/' || p === '/home') && req.method === 'GET') return handleStaticFile(res, 'home.html', 'text/html');
+    // 登录后用户门户
+    if (p === '/portal' && req.method === 'GET') return handleStaticFile(res, 'portal.html', 'text/html');
+    if (p === '/dashboard' && req.method === 'GET') {
       if (CONFIG.adminToken && !adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: '管理鉴权失败', type: 'auth_error' } });
       return handleDashboard(res);
+    }
+    // 用户认证 API（/api/auth/* 与 /api/portal/*）
+    if (p.startsWith('/api/auth/') || p === '/api/portal/mykeys') {
+      return await handleAuthApi(req, res, p);
     }
     if (p === '/health') return sendJson(res, 200, { status: 'ok', keys: POOL.totalKeys(), uptimeSec: Math.floor(process.uptime()) });
     if (p === '/stats' && req.method === 'GET') {

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API Key 代理池 — 免费 AI 模型聚合网关</title>
+<style>
+:root{
+  --bg:#f6f7fb; --card:#ffffff; --ink:#1a1d29; --sub:#5c6270; --line:#e6e8f0;
+  --brand:#5b5ff1; --brand-dark:#464ac9; --ok:#18a058; --radius:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);line-height:1.6}
+a{color:var(--brand);text-decoration:none}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+header{display:flex;align-items:center;justify-content:space-between;padding:18px 0}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px}
+.logo .dot{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--brand),#8b5ff1);display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:14px}
+nav a{margin-left:18px;color:var(--sub);font-size:14px}
+nav a:hover{color:var(--ink)}
+.hero{padding:72px 0 48px;text-align:center}
+.hero h1{font-size:40px;line-height:1.25;letter-spacing:-.5px}
+.hero h1 em{font-style:normal;background:linear-gradient(120deg,var(--brand),#a55ff1);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p{color:var(--sub);font-size:17px;margin:18px auto 30px;max-width:560px}
+.cta{display:flex;gap:12px;justify-content:center}
+.btn{display:inline-flex;align-items:center;gap:8px;border-radius:10px;padding:11px 22px;font-size:15px;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--ink);transition:.15s}
+.btn:hover{border-color:var(--brand);color:var(--brand)}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.btn.primary:hover{background:var(--brand-dark);color:#fff}
+.feat{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:56px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:24px}
+.card .ic{width:38px;height:38px;border-radius:10px;background:#eef0ff;display:flex;align-items:center;justify-content:center;font-size:19px;margin-bottom:14px}
+.card h3{font-size:16px;margin-bottom:6px}
+.card p{font-size:13.5px;color:var(--sub)}
+.code{background:#14161f;color:#d6dcff;border-radius:12px;padding:18px 20px;font-family:ui-monospace,Consolas,monospace;font-size:13px;overflow:auto;margin:8px 0 56px;line-height:1.7}
+.code .c{color:#7e85a8}
+footer{border-top:1px solid var(--line);padding:26px 0 40px;color:var(--sub);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+@media(max-width:720px){.feat{grid-template-columns:1fr}.hero h1{font-size:30px}}
+/* 弹层 */
+.mask{position:fixed;inset:0;background:rgba(20,22,35,.45);display:none;align-items:center;justify-content:center;z-index:50}
+.mask.show{display:flex}
+.modal{background:#fff;border-radius:16px;padding:26px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+.modal h3{margin-bottom:4px}
+.modal .sub{color:var(--sub);font-size:13px;margin-bottom:16px}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:13px;color:var(--sub);margin-bottom:5px}
+.field input{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:14px;outline:none}
+.field input:focus{border-color:var(--brand)}
+.cap-row{display:flex;gap:10px;align-items:center}
+.cap-row img{border-radius:8px;border:1px solid var(--line);cursor:pointer;height:42px}
+.err{color:#d93843;font-size:13px;margin:6px 0;display:none}
+.row2{display:flex;gap:10px}
+.row2 .btn{flex:1;justify-content:center}
+.switch{font-size:13px;text-align:center;margin-top:14px;color:var(--sub)}
+.switch a{cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo"><span class="dot">池</span>API Key 代理池</div>
+    <nav>
+      <a href="/dashboard">状态</a>
+      <a href="#" id="nav-login">登录</a>
+      <a href="#" id="nav-register" style="color:var(--brand);font-weight:600">注册</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1>多个免费 AI 额度<br>聚合成<em>一个接口</em></h1>
+    <p>把商汤、英伟达、ModelScope、OpenRouter 等平台的免费 Key 打成一块。轮询分摊、限流自动切换、额度用尽智能冷却——你只管调 <code>base_url</code>。</p>
+    <div class="cta">
+      <button class="btn primary" id="cta-register">免费注册</button>
+      <button class="btn" id="cta-login">已有账号登录</button>
+    </div>
+  </section>
+
+  <section class="feat">
+    <div class="card"><div class="ic">🔀</div><h3>统一入口</h3><p>OpenAI 兼容协议,一个地址、一个 Key,模型别名随取:deepseek / kimi / qwen / glm。</p></div>
+    <div class="card"><div class="ic">🛡️</div><h3>限流自愈</h3><p>429 自动换 Key 重试,额度用尽对齐平台重置周期冷却,半开探活自动复活误伤 Key。</p></div>
+    <div class="card"><div class="ic">📊</div><h3>用量透明</h3><p>每个账号的调用次数、配额余量、模型分布实时可查,密钥自管。</p></div>
+  </section>
+
+  <div class="code"><span class="c"># 任何 OpenAI SDK,只改 base_url</span>
+client = OpenAI(
+    base_url="<span id="code-addr">http://your-host:8787</span>/v1",
+    api_key="<b>你的分发 Key</b>",   <span class="c"># 注册后在门户获取</span>
+)
+r = client.chat.completions.create(model=<span id="code-model">"auto"</span>, messages=[{"role":"user","content":"你好"}])</div>
+
+  <footer>
+    <div>API Key 代理池 · 零依赖 · OpenAI 兼容</div>
+    <div><a href="/admin">管理入口</a></div>
+  </footer>
+</div>
+
+<!-- 登录/注册弹层 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <h3 id="m-title">登录</h3>
+    <div class="sub" id="m-sub">使用已注册的账号</div>
+    <div class="err" id="m-err"></div>
+    <div class="field"><label>用户名</label><input id="m-name" autocomplete="username" maxlength="24"></div>
+    <div class="field"><label>密码</label><input id="m-pass" type="password" autocomplete="current-password"></div>
+    <div class="field"><label>验证码(点击图片刷新)</label>
+      <div class="cap-row"><input id="m-cap" maxlength="4" style="flex:1" placeholder="不分大小写"><img id="m-capimg" alt="验证码" title="点击刷新"></div>
+    </div>
+    <div class="row2">
+      <button class="btn" id="m-cancel">取消</button>
+      <button class="btn primary" id="m-ok">登录</button>
+    </div>
+    <div class="switch" id="m-switch"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let mode='login', captchaId='';
+const err=(m)=>{ const e=$('m-err'); if(m){e.textContent=m;e.style.display='block';} else e.style.display='none'; };
+
+async function refreshCaptcha(){
+  const r=await fetch('/api/auth/captcha');
+  captchaId=r.headers.get('x-captcha-id');
+  const blob=await r.text();
+  $('m-capimg').src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(blob)));
+  $('m-cap').value='';
+}
+function openModal(m){ mode=m; err(''); $('m-title').textContent=m==='login'?'登录':'注册账号'; $('m-sub').textContent=m==='login'?'使用已注册的账号':'注册即获得专属调用 Key(需管理员开通)'; $('m-ok').textContent=m==='login'?'登录':'注册'; $('m-switch').innerHTML=m==='login'?'没有账号?<a id="sw">去注册</a>':'已有账号?<a id="sw">去登录</a>'; $('m-switch').querySelector('#sw').onclick=()=>openModal(m==='login'?'register':'login'); $('mask').classList.add('show'); refreshCaptcha(); setTimeout(()=>$('m-name').focus(),50); }
+function closeModal(){ $('mask').classList.remove('show'); }
+$('nav-login').onclick=(e)=>{e.preventDefault();openModal('login')};
+$('nav-register').onclick=(e)=>{e.preventDefault();openModal('register')};
+$('cta-login').onclick=()=>openModal('login');
+$('cta-register').onclick=()=>openModal('register');
+$('m-cancel').onclick=closeModal;
+$('m-capimg').onclick=refreshCaptcha;
+$('m-capimg').onerror=()=>{ /* btoa 对中文无关,svg 纯 ASCII,不该失败 */ };
+$('mask').addEventListener('click',e=>{ if(e.target===$('mask')) closeModal(); });
+
+$('m-ok').onclick=async ()=>{
+  const name=$('m-name').value.trim(), password=$('m-pass').value, captchaText=$('m-cap').value.trim();
+  if(!name||!password||!captchaText) return err('请填写完整');
+  err('');
+  try{
+    const r=await fetch('/api/auth/'+mode,{
+      method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({name,password,captchaId,captchaText})
+    });
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ err(d.error&&d.error.message||('失败 '+r.status)); refreshCaptcha(); return; }
+    closeModal();
+    location.href='/portal';   // 登录/注册成功 → 用户门户
+  }catch(e){ err('网络异常:'+e.message); }
+};
+['m-name','m-pass','m-cap'].forEach(id=>$(id).addEventListener('keydown',e=>{ if(e.key==='Enter') $('m-ok').click(); }));
+
+// 首页代码块展示当前访问地址
+$('code-addr').textContent = location.protocol+'//'+location.host;
+</script>
+</body>
+</html>
