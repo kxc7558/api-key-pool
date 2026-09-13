@@ -116,6 +116,7 @@ const statusCell=(s)=>s==null?'<span class="status-warn">中断</span>':(s<400?'
   }catch(e){ location.href='/'; return; }
   $('uname').textContent=me.name;
   if(me.role&&me.role!=='user'){ $('urole').textContent=me.role==='admin'?'管理员':'协同管理员'; $('urole').style.display='inline'; $('btn-admin').style.display='inline-block'; }
+  if(me.mustChangePassword){ setTimeout(()=>showChangePwd('你用的是预设密码,为了安全请立即修改'),400); }
 
   // 我的 Key 与用量
   let d=null;
@@ -179,6 +180,32 @@ const statusCell=(s)=>s==null?'<span class="status-warn">中断</span>':(s<400?'
 
 $('btn-logout').onclick=async()=>{ await fetch('/api/auth/logout',{method:'POST'}); location.href='/'; };
 $('btn-admin').onclick=()=>{ location.href='/admin'; };
+
+/* 改密码弹层 */
+function showChangePwd(reason){
+  const mask=document.createElement('div');
+  mask.style.cssText='position:fixed;inset:0;background:rgba(20,22,35,.5);display:flex;align-items:center;justify-content:center;z-index:99';
+  mask.innerHTML=`<div style="background:#fff;border-radius:16px;padding:26px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.2)">
+    <h3 style="margin-bottom:4px">修改密码</h3>
+    <div style="color:var(--warn);font-size:13px;margin-bottom:14px">${reason}</div>
+    <div style="margin-bottom:10px"><label style="font-size:13px;color:var(--sub)">旧密码/当前密码</label><input id="cp-old" type="password" style="width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 12px"></div>
+    <div style="margin-bottom:12px"><label style="font-size:13px;color:var(--sub)">新密码(至少6位)</label><input id="cp-new" type="password" style="width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 12px"></div>
+    <div id="cp-err" style="color:#d93843;font-size:13px;margin-bottom:8px;display:none"></div>
+    <button id="cp-ok" class="btn" style="background:var(--brand);border-color:var(--brand);color:#fff;width:100%;justify-content:center">确认修改</button>
+  </div>`;
+  document.body.appendChild(mask);
+  mask.querySelector('#cp-ok').onclick=async()=>{
+    const oldPassword=mask.querySelector('#cp-old').value, newPassword=mask.querySelector('#cp-new').value;
+    const r=await fetch('/api/auth/password',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({oldPassword,newPassword})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ const e=mask.querySelector('#cp-err'); e.textContent=d.error&&d.error.message||'失败'; e.style.display='block'; return; }
+    mask.remove();
+    const ok=document.createElement('div');
+    ok.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#18a058;color:#fff;border-radius:10px;padding:10px 20px;z-index:100';
+    ok.textContent='密码已修改';
+    document.body.appendChild(ok); setTimeout(()=>ok.remove(),2200);
+  };
+}
 </script>
 </body>
 </html>

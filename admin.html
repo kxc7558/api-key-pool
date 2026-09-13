@@ -308,9 +308,95 @@ async function loadStats(){
   } catch(_) {}
 }
 
+/* ================= 全量防呆校验(保存前) =================
+ * 返回 null=通过;字符串=用户确认后可保存(警告);抛 Error=硬错误必须改 */
+function validateConfig(){
+  const problems=[];      // 硬错误
+  const warnings=[];      // 确认后可过
+  const providers = cfg.providers||[];
+  const pnames = new Set();
+
+  // ---- 平台 ----
+  for (const p of providers){
+    if (!p.name) problems.push('有平台没填名称');
+    else if (pnames.has(p.name)) problems.push(`平台名重复:${p.name}`);
+    pnames.add(p.name);
+    if (!p.baseUrl) problems.push(`平台「${p.name||'?'}」没填 baseUrl`);
+    else if (!/^https?:\/\//.test(p.baseUrl)) problems.push(`平台「${p.name}」的 baseUrl 要以 http(s):// 开头`);
+    else if (p.baseUrl.endsWith('/')) warnings.push(`平台「${p.name}」的 baseUrl 以 / 结尾(建议去掉,会自动拼接)`);
+    const liveKeys=(p.keys||[]).filter(k=>!k.startsWith('#')&&!k.startsWith('env:'));
+    if (!p.keys||!p.keys.length) warnings.push(`平台「${p.name}」没有任何 Key`);
+    // Key 格式防呆:常见平台前缀
+    const expectPrefix={nvidia:'nvapi-',sensenova:'sk-',openrouter:'sk-or-',modelscope:'ms-',deepseek:'sk-',moonshot:'sk-',zhipu:''};
+    const want=expectPrefix[(p.name||'').toLowerCase()];
+    if (want){
+      const bad=liveKeys.filter(k=>!k.startsWith(want));
+      if (bad.length) warnings.push(`平台「${p.name}」有 ${bad.length} 个 Key 不以 ${want} 开头(确认是否拿对了平台的 Key)`);
+    }
+    // 同 key 重复(忽略 @分组标签)
+    const seen=new Set(); const dups=[];
+    for (const k of liveKeys){ const base=k.split('@')[0]; if(seen.has(base)) dups.push(base.slice(0,10)+'…'); seen.add(base); }
+    if (dups.length) warnings.push(`平台「${p.name}」有重复 Key:${dups.join('、')}(重复 Key 会进轮询白占名额)`);
+    // rpm 语义防呆:同账号分组但 rpmPerAccount=0
+    const grouped=(p.keys||[]).some(k=>k.includes('@'));
+    if (grouped && (p.rpmPerAccount||0)===0 && (p.rpmPerKey||0)>0)
+      warnings.push(`平台「${p.name}」用了 @账号分组 却没设 rpmPerAccount —— 同账号多 Key 不会叠加额度,建议设 rpmPerAccount`);
+  }
+
+  // ---- 模型别名 ----
+  for (const [alias,cands] of Object.entries(cfg.models||{})){
+    if (alias.startsWith('_')) continue;
+    if (!/^[a-zA-Z0-9_-]+$/.test(alias)) problems.push(`别名「${alias}」含特殊字符(客户端要填它,只用英文数字-_)`);
+    if (!Array.isArray(cands)||!cands.length){ problems.push(`别名「${alias}」没有候选,等于调不通`); continue; }
+    for (const t of cands){
+      if (!t.provider||!pnames.has(t.provider)) problems.push(`别名「${alias}」引用了不存在的平台「${t.provider||'(空)'}」`);
+      if (!t.model) problems.push(`别名「${alias}」有候选没填模型 ID`);
+    }
+    const hasPrimary=cands.some(t=>!t.fallback);
+    const hasFb=cands.some(t=>t.fallback);
+    if (!hasPrimary) warnings.push(`别名「${alias}」所有候选都是兜底 —— 正常流量没有主力可走,确认是否漏勾`);
+  }
+
+  // ---- 分发 Key ----
+  const names={};
+  for (const r of accessRows){
+    if (!r.key) problems.push('有分发 Key 没填 Key 值');
+    else if (!r.key.startsWith('sk-pool-')) warnings.push(`分发 Key「${r.key.slice(0,12)}…」不是 sk-pool- 前缀(会与上游 Key 混淆,建议重新生成)`);
+    if (r.rpm>0 && r.rpm>200) warnings.push(`「${r.name||r.key.slice(0,10)}」RPM 上限 ${r.rpm} 异常大(上游全池加起来也就几十),确认不是把日配额填进来了`);
+    if (r.daily>0 && r.daily>50000) warnings.push(`「${r.name||r.key.slice(0,10)}」日配额 ${r.daily} 异常大,确认`);
+    if (r.name && r.name!=='(未命名)') { names[r.name]=(names[r.name]||0)+1; }
+  }
+
+  // ---- 时间类字段防呆(填了过小/过大的值) ----
+  const timeChecks=[
+    ['waitForSlotMs',500,300000,'排队等待'],
+    ['cooldownMs',1000,3600000,'429冷却'],
+    ['maxCooldownMs',10000,86400000,'冷却上限'],
+    ['requestTimeoutMs',3000,600000,'请求超时'],
+    ['halfOpen.probeIntervalMs',1000,300000,'探活节拍'],
+    ['halfOpen.reviveDelayMs',10000,86400000,'复活等待'],
+    ['breaker.openMs',1000,1800000,'熔断时长'],
+  ];
+  const human=(ms)=>ms>=3600000?(ms/3600000)+'小时':ms>=60000?(ms/60000)+'分钟':(ms/1000)+'秒';
+  for (const [k,min,max,label] of timeChecks){
+    const v=getByPath(cfg,k);
+    if (v==null||v===0) continue;
+    if (v<min) warnings.push(`${label}=${v}ms 太小(不到 ${(min/1000)}秒),是不是想填秒?${human(min)}≈${min}ms`);
+    if (v>max) warnings.push(`${label}=${v}ms 异常大(${human(v)}),是不是多打了 0?`);
+  }
+
+  if (problems.length) throw new Error(problems.slice(0,6).join('\n'));
+  return warnings.length ? warnings.slice(0,8).join('\n') : null;
+}
+
 async function save(){
   if (!cfg) return;
   syncAccessToCfg();
+  // 全量防呆:硬错误阻断;警告需确认
+  let vMsg=null;
+  try { vMsg = validateConfig(); }
+  catch(e){ toast('保存被拦下 —— ' + e.message.split('\n')[0] + (e.message.includes('\n')?'(等 '+e.message.split('\n').length+' 处)',''), 'err'); alert('配置有硬错误,必须修改:\n\n'+e.message); return; }
+  if (vMsg && !confirm('发现以下可疑之处(确认无误可继续保存):\n\n'+vMsg)) return;
   const oldToken = cfg.adminToken;
   const r = await api('PUT', '/admin/api/config', cfg);
   if (r.status === 200){

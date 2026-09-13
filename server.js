@@ -1756,6 +1756,24 @@ function loadUsers() {
     for (const u of arr) { USERS.byName.set(u.name, u); USERS.byId.set(u.id, u); }
     if (arr.length) log('info', `用户账号已载入：${arr.length} 个`, 'green');
   } catch (_) { /* 首次启动无用户文件 */ }
+  ensureDefaultAdmin();
+}
+/** 预设管理员：无 admin 账号时自动创建(默认密码在下方,登录后会提示修改) */
+const DEFAULT_ADMIN_PASSWORD = 'Admin@2026';
+function ensureDefaultAdmin() {
+  if (USERS.byName.has('admin')) return;
+  const { salt, hash } = hashPassword(DEFAULT_ADMIN_PASSWORD);
+  const user = { id: crypto.randomBytes(8).toString('hex'), name: 'admin', salt, hash, role: 'admin', mustChangePassword: true, createdAt: Date.now() };
+  USERS.byName.set('admin', user); USERS.byId.set(user.id, user); saveUsers();
+  log('warn', `已创建预设管理员 admin(默认密码见部署记录,请登录后立即修改)`, 'yellow');
+}
+/** 用户改密码 */
+function changePassword(user, newPassword) {
+  if (!newPassword || String(newPassword).length < 6) return false;
+  const { salt, hash } = hashPassword(newPassword);
+  user.salt = salt; user.hash = hash; user.mustChangePassword = false;
+  saveUsers();
+  return true;
 }
 function saveUsers() {
   fs.writeFileSync(USERS_PATH, JSON.stringify([...USERS.byId.values()], null, 2), 'utf8');
@@ -1905,7 +1923,19 @@ function handleAuthApi(req, res, p) {
     if (p === '/api/auth/me' && req.method === 'GET') {
       const cur = currentUser(req);
       if (!cur) return sendJson(res, 401, { error: { message: '未登录', type: 'auth_error' } });
-      return sendJson(res, 200, { name: cur.user.name, role: cur.user.role, createdAt: cur.user.createdAt });
+      return sendJson(res, 200, { name: cur.user.name, role: cur.user.role, createdAt: cur.user.createdAt, mustChangePassword: !!cur.user.mustChangePassword });
+    }
+
+    // 修改自己的密码(登录后)
+    if (p === '/api/auth/password' && req.method === 'POST') {
+      const cur = currentUser(req);
+      if (!cur) return sendJson(res, 401, { error: { message: '未登录', type: 'auth_error' } });
+      const { oldPassword, newPassword } = body;
+      if (!verifyPassword(oldPassword, cur.user.salt, cur.user.hash)) return sendJson(res, 400, { error: { message: '旧密码错误', type: 'auth_error' } });
+      if (!newPassword || String(newPassword).length < 6) return sendJson(res, 400, { error: { message: '新密码至少 6 位', type: 'invalid_request_error' } });
+      changePassword(cur.user, newPassword);
+      log('info', `用户 ${cur.user.name} 已修改密码`, 'green');
+      return sendJson(res, 200, { ok: true });
     }
 
     // 登录用户：查看自己的分发 Key 与用量（按用户名与 accessKeys 里的 name 匹配）
