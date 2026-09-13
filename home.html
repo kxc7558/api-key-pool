@@ -101,7 +101,7 @@ r = client.chat.completions.create(model=<span id="code-model">"auto"</span>, me
     <div class="sub" id="m-sub">使用已注册的账号</div>
     <div class="err" id="m-err"></div>
     <div class="field"><label>用户名</label><input id="m-name" autocomplete="username" maxlength="24"></div>
-    <div class="field"><label>密码</label><input id="m-pass" type="password" autocomplete="current-password"></div>
+    <div class="field"><label>密码</label><input id="m-pass" type="password" autocomplete="current-password" placeholder="普通用户填密码;管理员/协同管理员填其 Token"></div>
     <div class="field"><label>验证码(点击图片刷新)</label>
       <div class="cap-row"><input id="m-cap" maxlength="4" style="flex:1" placeholder="不分大小写"><img id="m-capimg" alt="验证码" title="点击刷新"></div>
     </div>
@@ -149,7 +149,8 @@ $('m-ok').onclick=async ()=>{
     const d=await r.json().catch(()=>({}));
     if(!r.ok){ err(d.error&&d.error.message||('失败 '+r.status)); refreshCaptcha(); return; }
     closeModal();
-    location.href='/portal';   // 登录/注册成功 → 用户门户
+    // 按角色落地:普通用户→门户;管理员/协同→管理台
+    location.href = (d.role==='admin'||d.role==='collab') ? '/admin' : '/portal';
   }catch(e){ err('网络异常:'+e.message); }
 };
 ['m-name','m-pass','m-cap'].forEach(id=>$(id).addEventListener('keydown',e=>{ if(e.key==='Enter') $('m-ok').click(); }));

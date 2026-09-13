@@ -200,6 +200,7 @@
     <button data-tab="access"><svg class="ic"><use href="#i-link"/></svg>对接密钥</button>
     <button data-tab="collab-keys" style="display:none"><svg class="ic"><use href="#i-key"/></svg>放 Key 入池</button>
     <button data-tab="collab-access" style="display:none"><svg class="ic"><use href="#i-link"/></svg>生成用户Key</button>
+    <button data-tab="collab-list" style="display:none"><svg class="ic"><use href="#i-list"/></svg>我创建的Key</button>
     <button data-tab="logs"><svg class="ic"><use href="#i-list"/></svg>使用记录</button>
     <button data-tab="usage"><svg class="ic"><use href="#i-chart"/></svg>用量统计</button>
     <button data-tab="settings"><svg class="ic"><use href="#i-gear"/></svg>设置</button>
@@ -772,8 +773,17 @@ function renderSettings(){
   const d = cfg.defaults || {};
   const al = (cfg.alert||{}).email || {};
   const authCodeSet = al.authCode === '__SET__';
-  const num = (k,label,ph,note)=>`<div class="field"><label>${label}</label>
-    <input class="f" type="number" data-set="${k}" value="${getByPath(cfg,k)??''}" placeholder="${ph}"><div class="hint">${note}</div></div>`;
+  // 时间类字段:值是毫秒。界面把「当前值换算成人类可读」显示在 hint,防 ms/s 填错
+  const msHuman = (ms)=>{
+    if (ms==null||ms==='') return '';
+    if (ms>=86400000) return '当前: '+(ms/86400000).toFixed(1).replace(/\.0$/,'')+' 天';
+    if (ms>=3600000) return '当前: '+(ms/3600000).toFixed(1).replace(/\.0$/,'')+' 小时';
+    if (ms>=60000) return '当前: '+(ms/60000).toFixed(1).replace(/\.0$/,'')+' 分钟';
+    if (ms>=1000) return '当前: '+(ms/1000).toFixed(1).replace(/\.0$/,'')+' 秒';
+    return '当前: '+ms+' 毫秒';
+  };
+  const msNum = (k,label,ph,note)=>`<div class="field"><label>${label}</label>
+    <input class="f" type="number" data-set="${k}" value="${getByPath(cfg,k)??''}" placeholder="${ph}"><div class="hint">${note} · ${msHuman(getByPath(cfg,k))}</div></div>`;
   $main.innerHTML = `
   <div class="card"><h3>调度与容错</h3>
     <div class="grid3">
@@ -789,14 +799,14 @@ function renderSettings(){
       ${num('maxAttempts','最大尝试次数 maxAttempts','8','单次请求最多试多少个「模型+Key」组合')}
     </div>
     <div class="grid3">
-      ${num('waitForSlotMs','排队等待(ms) waitForSlotMs','20000','全忙时最多排队多久')}
-      ${num('cooldownMs','429 冷却(ms) cooldownMs','60000','撞限流后的基础冷却')}
-      ${num('maxCooldownMs','冷却上限(ms) maxCooldownMs','600000','指数退避封顶')}
+      ${msNum('waitForSlotMs','排队等待 waitForSlotMs','20000','全忙时最多排队多久(毫秒)')}
+      ${msNum('cooldownMs','429 冷却 cooldownMs','60000','撞限流后的基础冷却(毫秒)')}
+      ${msNum('maxCooldownMs','冷却上限 maxCooldownMs','600000','指数退避封顶(毫秒)')}
     </div>
     <div class="grid3">
-      ${num('serverErrorCooldownMs','5xx 冷却(ms)','8000','上游报错后短暂冷却')}
-      ${num('requestTimeoutMs','请求超时(ms)','120000','单个上游请求超时')}
-      ${num('streamIdleTimeoutMs','流式空闲超时(ms)','90000','流式多久没数据就断')}
+      ${msNum('serverErrorCooldownMs','5xx 冷却(ms)','8000','上游报错后短暂冷却')}
+      ${msNum('requestTimeoutMs','请求超时(ms)','120000','单个上游请求超时')}
+      ${msNum('streamIdleTimeoutMs','流式空闲超时(ms)','90000','流式多久没数据就断')}
     </div>
   </div>
   <div class="card"><h3>调度增强 <span class="tag">连坐冷却 · 半开探活 · 模型熔断（2026-09-02 新增）</span></h3>
@@ -809,22 +819,22 @@ function renderSettings(){
       <div class="field" style="display:flex;align-items:center;gap:8px;min-height:34px"><label style="margin:0;font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px">
         <input type="checkbox" data-set="halfOpen.enabled" ${(cfg.halfOpen||{}).enabled!==false?'checked':''}> 半开探活（默认开）</label>
         <span class="hint">冷却/下线 Key 先探活再回池</span></div>
-      ${num('halfOpen.probeIntervalMs','探活节拍(ms)','15000','每隔多久扫一批到期 Key')}
-      ${num('halfOpen.probeTimeoutMs','探活超时(ms)','10000','单次探活请求超时')}
+      ${msNum('halfOpen.probeIntervalMs','探活节拍(ms)','15000','每隔多久扫一批到期 Key')}
+      ${msNum('halfOpen.probeTimeoutMs','探活超时(ms)','10000','单次探活请求超时')}
     </div>
     <div class="grid3">
       ${num('halfOpen.probeMaxPerTick','每批探活数','2','防探测风暴')}
       <div class="field" style="display:flex;align-items:center;gap:8px;min-height:34px"><label style="margin:0;font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px">
         <input type="checkbox" data-set="halfOpen.reviveDead" ${(cfg.halfOpen||{}).reviveDead!==false?'checked':''}> 下线 Key 自动复活（默认开）</label>
         <span class="hint">探活通过即复活（临时风控场景）</span></div>
-      ${num('halfOpen.reviveDelayMs','复活等待(ms)','600000','下线后多久允许探活复活')}
+      ${msNum('halfOpen.reviveDelayMs','复活等待(ms)','600000','下线后多久允许探活复活 · 10分钟=600000')}
     </div>
     <div class="grid3">
       <div class="field" style="display:flex;align-items:center;gap:8px;min-height:34px"><label style="margin:0;font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px">
         <input type="checkbox" data-set="breaker.enabled" ${(cfg.breaker||{}).enabled!==false?'checked':''}> 模型熔断（默认开）</label>
         <span class="hint">连败模型秒回 503</span></div>
       ${num('breaker.failThreshold','熔断阈值(次)','3','连续几次全败触发熔断')}
-      ${num('breaker.openMs','熔断时长(ms)','30000','期间该模型秒回 503')}
+      ${msNum('breaker.openMs','熔断时长(ms)','30000','期间该模型秒回 503')}
     </div>
     <div class="hint" style="margin-top:4px">探活是免费的 GET /models，不消耗 chat 额度；详细说明见 CONFIG.md「调度增强」一节。</div>
   </div>
@@ -1083,12 +1093,12 @@ document.getElementById('modal-ok').addEventListener('click', async ()=>{
   }
 });
 
-/* 协同管理员：精简界面（只保留 放上游Key / 生成用户Key 两个功能） */
+/* 协同管理员：精简界面（只保留 放上游Key / 生成用户Key / 我创建的Key 三个功能） */
 function applyRoleUI(){
   if (role !== 'collab') return;
   document.querySelectorAll('#nav [data-tab]').forEach(b=>{
     const t = b.dataset.tab;
-    if (t !== 'collab-keys' && t !== 'collab-access') b.style.display = 'none';
+    if (t !== 'collab-keys' && t !== 'collab-access' && t !== 'collab-list') b.style.display = 'none';
   });
   // 顶栏保存/刷新按钮对协同管理员隐藏（他们的操作即时生效，无草稿态）
   document.getElementById('btn-save').style.display = 'none';
@@ -1164,6 +1174,24 @@ async function renderCollab(){
         toast(`已生成 ${r.created.length} 个 Key`, 'ok');
       } catch(e){ toast('失败：'+e.message, 'err'); }
     });
+  } else if (currentTab === 'collab-list'){
+    main.innerHTML = `<div class="box"><h3>我创建的分发 Key</h3><div class="sub">含每个 Key 的实时用量。重新点页签即刷新。</div><div id="cl-body"><div class="faint">加载中…</div></div></div>`;
+    (async ()=>{
+      const body = document.getElementById('cl-body');
+      try {
+        const r = await collabApi('GET', '/admin/api/collab/listAccessKeys');
+        if (!r.keys.length){ body.innerHTML = '<div class="faint">还没有创建过。去「生成用户Key」创建。</div>'; return; }
+        body.innerHTML = '<div class="tbl-wrap"><table><thead><tr><th>Key</th><th>用户名</th><th>限额</th><th>今日</th><th>累计</th><th>状态</th></tr></thead><tbody>'
+          + r.keys.map(k=>`<tr>
+            <td class="mono" style="user-select:all;word-break:break-all">${esc(k.key)}</td>
+            <td>${esc(k.name)}</td>
+            <td>${k.rpm||'∞'} RPM / 日 ${k.daily||'∞'}</td>
+            <td><b>${k.today||0}</b></td>
+            <td>${k.total||0}</td>
+            <td>${k.stillExists===false?'<span style="color:var(--red)">已删除</span>':'<span style="color:var(--ok)">有效</span>'}</td>
+          </tr>`).join('') + '</tbody></table></div>';
+      } catch(e){ body.innerHTML = '<div class="faint">加载失败：'+esc(e.message)+'</div>'; }
+    })();
   }
 }
 document.getElementById('modal-cancel').addEventListener('click', closeModal);
@@ -1173,7 +1201,7 @@ document.getElementById('modal-pwd').addEventListener('keydown', e=>{ if(e.key==
 document.getElementById('nav').addEventListener('click', (e)=>{
   const b = e.target.closest('[data-tab]'); if(!b) return;
   const t = b.dataset.tab;
-  if (t === 'collab-keys' || t === 'collab-access'){ currentTab = t; renderCollab(); }
+  if (t === 'collab-keys' || t === 'collab-access' || t === 'collab-list'){ currentTab = t; renderCollab(); }
 });
 
 /* ================= 启动 ================= */

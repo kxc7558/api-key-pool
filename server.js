@@ -1703,6 +1703,11 @@ async function handleCollabApi(req, res, url, collab) {
       const finalName = count > 1 ? `${name}${i + 1}` : name;
       raw.accessKeys[key] = { name: finalName, rpm, daily };
       created.push({ key, name: finalName, rpm, daily });
+      // 记录创建者，供协同管理员之后查看自己发的 Key
+      if (collab.token !== '(admin)') {
+        if (!COLLAB_CREATED.has(collab.token)) COLLAB_CREATED.set(collab.token, []);
+        COLLAB_CREATED.get(collab.token).push(key);
+      }
     }
     save();
     log('info', `协同管理员「${collab.name}」创建 ${count} 个分发 Key（${name}，${rpm}RPM/日${daily}）`, 'magenta');
@@ -1731,6 +1736,7 @@ const USERS_PATH = path.join(ROOT, 'users.json');
 const USERS = { byName: new Map(), byId: new Map() };        // name -> user, id -> user
 const SESSIONS = new Map();                                  // sid -> { userId, name, role, createdAt }
 const CAPTCHAS = new Map();                                  // cid -> { text, expiresAt }
+const COLLAB_CREATED = new Map();                            // collabToken -> [accessKey...]（协同管理员创建的分发 Key 记录）
 const COOKIE_NAME = 'akp_session';
 
 function hashPassword(password, salt) {
@@ -1854,6 +1860,33 @@ function handleAuthApi(req, res, p) {
       if (!cap || cap.expiresAt < Date.now()) return sendJson(res, 400, { error: { message: '验证码已过期，请刷新', type: 'captcha_error' } });
       if (String(captchaText || '').toLowerCase() !== cap.text) { CAPTCHAS.delete(String(captchaId || '')); return sendJson(res, 400, { error: { message: '验证码错误', type: 'captcha_error' } }); }
       CAPTCHAS.delete(String(captchaId || ''));
+
+      // 管理员/协同管理员登录：password 即 adminToken / collab token。
+      // 首次用 token 登录会自动建立同名角色账号（密码=该token），之后也可在门户改密码。
+      const collabCfg = CONFIG.collabTokens || {};
+      const isAdminToken = CONFIG.adminToken && password === CONFIG.adminToken;
+      const collabName = collabCfg[password];
+      if (isAdminToken || collabName) {
+        const role = isAdminToken ? 'admin' : 'collab';
+        const uname = isAdminToken ? 'admin' : (USERS.byName.has('collab:' + collabName) ? 'collab:' + collabName : 'collab:' + collabName);
+        let user = USERS.byName.get(uname);
+        if (!user) {
+          const { salt, hash } = hashPassword(password);
+          user = { id: crypto.randomBytes(8).toString('hex'), name: uname, salt, hash, role, createdAt: Date.now() };
+          USERS.byName.set(uname, user); USERS.byId.set(user.id, user); saveUsers();
+          log('info', `角色账号自动建立：${uname}（${role}）`, 'magenta');
+        }
+        if (!verifyPassword(password, user.salt, user.hash)) {
+          // token 变过：同步更新该角色账号的密码哈希
+          const { salt, hash } = hashPassword(password);
+          user.salt = salt; user.hash = hash; saveUsers();
+        }
+        const sid = crypto.randomBytes(16).toString('hex');
+        SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
+        res.setHeader('set-cookie', `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
+        return sendJson(res, 200, { ok: true, name: user.name, role: user.role });
+      }
+
       const user = USERS.byName.get(String(name || ''));
       if (!user || !verifyPassword(password, user.salt, user.hash)) return sendJson(res, 401, { error: { message: '用户名或密码错误', type: 'auth_error' } });
       const sid = crypto.randomBytes(16).toString('hex');
@@ -1889,7 +1922,32 @@ function handleAuthApi(req, res, p) {
         }
       }
       const u = [...(accessUsers.values())].find((x) => x.name === cur.user.name);
-      return sendJson(res, 200, { keys: mine, usage: u ? { today: u.dailyCount, total: u.totalCalls, lastCallAt: u.lastCallAt } : { today: 0, total: 0, lastCallAt: null } });
+      const usage = u ? { today: u.dailyCount, total: u.totalCalls, lastCallAt: u.lastCallAt } : { today: 0, total: 0, lastCallAt: null };
+      // 近 7 天逐日用量 + 模型分布（读调用日志，按 callerName 匹配）
+      let daily = [], byModel = [], recent = [];
+      try {
+        const days = readUsageEntries(7);
+        const mineEntries = days.filter((e) => (e.callerName || '') === cur.user.name);
+        const dayMap = new Map();
+        const modelMap = new Map();
+        for (const e of mineEntries) {
+          const day = new Date(e.ts + 8 * 3600000).toISOString().slice(0, 10);
+          if (!dayMap.has(day)) dayMap.set(day, { date: day, calls: 0, ok: 0, fail: 0 });
+          const dd = dayMap.get(day); dd.calls++;
+          if (e.status != null && e.status < 400) dd.ok++; else if (e.status != null) dd.fail++;
+          if (e.model) {
+            if (!modelMap.has(e.model)) modelMap.set(e.model, { model: e.model, calls: 0, ok: 0, fail: 0 });
+            const mm = modelMap.get(e.model); mm.calls++;
+            if (e.status != null && e.status < 400) mm.ok++; else if (e.status != null) mm.fail++;
+          }
+        }
+        daily = [...dayMap.values()].sort((a, b) => (a.date < b.date ? -1 : 1)).slice(-7);
+        byModel = [...modelMap.values()].sort((a, b) => b.calls - a.calls);
+        recent = mineEntries.slice(-20).reverse().map((e) => ({
+          ts: e.ts, model: e.model, status: e.status, latencyMs: e.latencyMs, stream: e.stream, errorType: e.errorType || null,
+        }));
+      } catch (_) { /* 日志读失败不挡门户 */ }
+      return sendJson(res, 200, { keys: mine, usage, daily, byModel, recent });
     }
 
     return sendJson(res, 404, { error: { message: `不支持的认证路由 ${p}`, type: 'not_found' } });
@@ -2236,7 +2294,29 @@ const server = http.createServer(async (req, res) => {
         const providers = (POOL.providers instanceof Map)
           ? [...POOL.providers.values()].map((pr) => ({ name: pr.name, keyCount: pr.keys.length }))
           : [];
-        return sendJson(res, 200, { ok: true, name: collab.name, providers });
+        return sendJson(res, 200, { ok: true, name: collab.name, role: collab.token === '(admin)' ? 'admin' : 'collab', providers });
+      }
+      // 协同管理员：列出自己创建的分发 Key（按创建记录；管理员则列出全部）
+      if (p === '/admin/api/collab/listAccessKeys' && req.method === 'GET') {
+        let list = [];
+        if (collab.token === '(admin)') {
+          list = Object.entries(CONFIG.accessKeys || {}).map(([token, spec]) => {
+            const o = typeof spec === 'object' ? spec : { name: String(spec) };
+            return { key: token, name: o.name || '', rpm: o.rpm || 0, daily: o.daily || 0 };
+          });
+        } else {
+          const rec = COLLAB_CREATED.get(collab.token) || [];
+          list = rec.map((k) => {
+            const spec = (CONFIG.accessKeys || {})[k];
+            const o = typeof spec === 'object' ? spec : { name: '' };
+            return { key: k, name: o.name || '', rpm: o.rpm || 0, daily: o.daily || 0, stillExists: !!spec };
+          });
+        }
+        const withUsage = list.map((k) => {
+          const u = [...(accessUsers.values())].find((x) => x.name === k.name);
+          return Object.assign(k, { today: u ? u.dailyCount : 0, total: u ? u.totalCalls : 0 });
+        });
+        return sendJson(res, 200, { ok: true, keys: withUsage });
       }
       return await handleCollabApi(req, res, url, collab);
     }

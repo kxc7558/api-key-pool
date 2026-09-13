@@ -13,7 +13,7 @@
 body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);line-height:1.6}
 a{color:var(--brand);text-decoration:none}
 .wrap{max-width:880px;margin:0 auto;padding:0 20px}
-header{display:flex;align-items:center;justify-content:space-between;padding:18px 0}
+header{display:flex;align-items:center;justify-content:space-between;padding:18px 0;flex-wrap:wrap;gap:8px}
 .logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
 .logo .dot{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--brand),#8b5ff1);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:14px}
 .hdr-r{display:flex;align-items:center;gap:14px;font-size:14px;color:var(--sub)}
@@ -23,20 +23,26 @@ header{display:flex;align-items:center;justify-content:space-between;padding:18p
 h2{font-size:21px;margin:26px 0 14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;margin-bottom:18px}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
 .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px}
 .stat .n{font-size:26px;font-weight:700}
 .stat .t{font-size:13px;color:var(--sub)}
 .empty{color:var(--sub);font-size:14px;padding:18px 0;text-align:center}
 .keyrow{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .keyrow:last-child{border-bottom:none}
-.keyrow .mono{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;background:#f2f3f9;border-radius:7px;padding:5px 10px;user-select:all;word-break:break-all}
+.keyrow .mono{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;background:#f2f3f9;border-radius:7px;padding:5px 10px;-webkit-user-select:all;user-select:all;word-break:break-all}
 .tag{font-size:12px;border-radius:6px;padding:2px 8px;background:#eef0ff;color:var(--brand)}
 .tag.g{background:#e7f6ee;color:var(--ok)}
+.tag.r{background:#fef2f2;color:#ef4444}
 .hint{font-size:12.5px;color:var(--sub);margin-top:6px}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line)}
 th{color:var(--sub);font-weight:500;font-size:12.5px}
-@media(max-width:640px){.grid{grid-template-columns:1fr}}
+.bar{height:8px;border-radius:4px;background:#eef0f6;overflow:hidden}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--brand),#8b5ff1)}
+.bar>i.g{background:linear-gradient(90deg,#18a058,#34d399)}
+@media(max-width:640px){.grid,.grid4{grid-template-columns:1fr 1fr}}
+.status-ok{color:var(--ok)} .status-err{color:#ef4444} .status-warn{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -44,18 +50,21 @@ th{color:var(--sub);font-weight:500;font-size:12.5px}
   <header>
     <div class="logo"><span class="dot">池</span>API Key 代理池</div>
     <div class="hdr-r">
-      <span>你好,<b id="uname">…</b></span>
+      <span>你好,<b id="uname">…</b> <span class="tag" id="urole" style="display:none"></span></span>
       <a href="/" style="font-size:13.5px">首页</a>
+      <button class="btn" id="btn-admin" style="display:none">管理台</button>
       <button class="btn" id="btn-logout">退出</button>
     </div>
   </header>
 
   <h2>用量概览</h2>
-  <div class="grid">
+  <div class="grid4">
     <div class="stat"><div class="n" id="st-today">–</div><div class="t">今日调用</div></div>
     <div class="stat"><div class="n" id="st-total">–</div><div class="t">累计调用</div></div>
     <div class="stat"><div class="n" id="st-quota">–</div><div class="t">每日配额</div></div>
+    <div class="stat"><div class="n" id="st-rate">–</div><div class="t">今日配额使用</div></div>
   </div>
+  <div class="card" id="rate-card" style="display:none"><div class="bar"><i id="rate-bar" style="width:0%"></i></div></div>
 
   <h2>我的调用密钥</h2>
   <div class="card" id="keys-card">
@@ -64,11 +73,25 @@ th{color:var(--sub);font-weight:500;font-size:12.5px}
     <div class="hint">密钥即代码里的 <b>api_key</b>。请妥善保管,泄露后联系管理员重置。</div>
   </div>
 
+  <h2>近 7 天调用趋势</h2>
+  <div class="card" id="daily-card"><div class="empty">加载中…</div></div>
+
+  <h2>模型分布</h2>
+  <div class="card" id="model-card"><div class="empty">加载中…</div></div>
+
+  <h2>最近调用记录</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>方式</th></tr></thead>
+      <tbody id="recent-body"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
   <h2>接入方式</h2>
   <div class="card">
     <table>
       <tr><th>项目</th><th>值</th></tr>
-      <tr><td>接口地址(base_url)</td><td class="mono" id="addr" style="font-family:ui-monospace,Consolas,monospace;user-select:all">…</td></tr>
+      <tr><td>接口地址(base_url)</td><td id="addr" style="font-family:ui-monospace,Consolas,monospace;user-select:all">…</td></tr>
       <tr><td>可用模型</td><td id="models">…</td></tr>
       <tr><td>协议</td><td>OpenAI 兼容(chat/completions)</td></tr>
     </table>
@@ -80,6 +103,9 @@ th{color:var(--sub);font-weight:500;font-size:12.5px}
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
+const fmtT=(ts)=>ts?new Date(ts+8*3600000).toISOString().slice(0,16).replace('T',' '):'—';
+const statusCell=(s)=>s==null?'<span class="status-warn">中断</span>':(s<400?'<span class="status-ok">✓ '+s+'</span>':'<span class="status-err">✗ '+s+'</span>');
+
 (async function init(){
   // 会话检查
   let me;
@@ -89,15 +115,29 @@ const $=id=>document.getElementById(id);
     me=await r.json();
   }catch(e){ location.href='/'; return; }
   $('uname').textContent=me.name;
+  if(me.role&&me.role!=='user'){ $('urole').textContent=me.role==='admin'?'管理员':'协同管理员'; $('urole').style.display='inline'; $('btn-admin').style.display='inline-block'; }
 
   // 我的 Key 与用量
-  const kr=await fetch('/api/portal/mykeys').catch(()=>null);
-  if(kr&&kr.ok){
-    const d=await kr.json();
+  let d=null;
+  try{
+    const kr=await fetch('/api/portal/mykeys');
+    if(kr.status===401){ location.href='/'; return; }
+    d=await kr.json();
+  }catch(e){}
+
+  if(d){
     $('st-today').textContent=d.usage.today;
     $('st-total').textContent=d.usage.total;
     const quota=d.keys.reduce((m,k)=>Math.max(m,k.daily||0),0);
     $('st-quota').textContent=quota||'∞';
+    if(quota){
+      const pct=Math.min(100,Math.round(d.usage.today/quota*100));
+      $('st-rate').textContent=pct+'%';
+      $('rate-card').style.display='block';
+      $('rate-bar').style.width=pct+'%';
+      $('rate-bar').className=pct>90?'g':(pct>70?'':'g');
+      $('rate-bar').style.background = pct>90 ? 'linear-gradient(90deg,#f59e0b,#ef4444)' : 'linear-gradient(90deg,#5b5ff1,#8b5ff1)';
+    } else $('st-rate').textContent='不限';
     const list=$('keys-list'); list.innerHTML='';
     if(!d.keys.length){ $('keys-empty').textContent='还没有你的分发 Key —— 请联系管理员开通(注册用户名需与 Key 名一致)。'; $('keys-empty').style.display='block'; }
     else{
@@ -108,9 +148,28 @@ const $=id=>document.getElementById(id);
         list.appendChild(row);
       }
     }
-  }
 
-  // 模型列表
+    // 近 7 天趋势
+    if(d.daily&&d.daily.length){
+      const max=Math.max(...d.daily.map(x=>x.calls),1);
+      $('daily-card').innerHTML='<table><thead><tr><th>日期</th><th>调用</th><th>成功</th><th>失败</th><th style="width:40%">分布</th></tr></thead><tbody>'
+        + d.daily.map(x=>`<tr><td>${x.date}</td><td><b>${x.calls}</b></td><td class="status-ok">${x.ok}</td><td class="status-err">${x.fail}</td><td><div class="bar"><i style="width:${Math.round(x.calls/max*100)}%"></i></div></td></tr>`).join('')
+        + '</tbody></table>';
+    } else { $('daily-card').innerHTML='<div class="empty">近 7 天还没有调用记录</div>'; }
+
+    // 模型分布
+    if(d.byModel&&d.byModel.length){
+      const max=Math.max(...d.byModel.map(x=>x.calls),1);
+      $('model-card').innerHTML='<table><thead><tr><th>模型</th><th>调用</th><th>成功</th><th>失败</th><th style="width:40%">占比</th></tr></thead><tbody>'
+        + d.byModel.map(x=>`<tr><td><b>${x.model}</b></td><td>${x.calls}</td><td class="status-ok">${x.ok}</td><td class="status-err">${x.fail}</td><td><div class="bar"><i style="width:${Math.round(x.calls/max*100)}%"></i></div></td></tr>`).join('')
+        + '</tbody></table>';
+    } else { $('model-card').innerHTML='<div class="empty">暂无模型使用记录</div>'; }
+
+    // 最近调用
+    if(d.recent&&d.recent.length){
+      $('recent-body').innerHTML=d.recent.map(e=>`<tr><td>${fmtT(e.ts)}</td><td>${e.model||'—'}</td><td>${statusCell(e.status)}</td><td>${e.latencyMs||0}ms</td><td>${e.stream?'流式':'普通'}</td></tr>`).join('');
+    } else { $('recent-body').innerHTML='<tr><td colspan="5" class="empty">还没有调用记录</td></tr>'; }
+  }
   try{
     const mr=await fetch('/v1/models');
     if(mr.ok){ const md=await mr.json(); $('models').textContent=(md.data||[]).map(m=>m.id).join(' / '); }
@@ -119,6 +178,7 @@ const $=id=>document.getElementById(id);
 })();
 
 $('btn-logout').onclick=async()=>{ await fetch('/api/auth/logout',{method:'POST'}); location.href='/'; };
+$('btn-admin').onclick=()=>{ location.href='/admin'; };
 </script>
 </body>
 </html>
