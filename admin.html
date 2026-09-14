@@ -1292,6 +1292,26 @@ document.getElementById('nav').addEventListener('click', (e)=>{
 
 /* ================= 启动 ================= */
 (async function init(){
+  // 已有 localStorage token → 直接用;没有 → 先探 cookie 会话(从门户登录跳转过来的 admin/collab)
+  if (!token){
+    try {
+      const r = await fetch('/api/auth/me');
+      if (r.status === 200){
+        const me = await r.json();
+        if (me.role === 'admin'){ role='admin'; }
+        else if (me.role === 'collab'){ role='collab'; }
+        if (role !== 'admin'){
+          // collab 走会话:拉平台列表后进精简界面(接口鉴权走 cookie)
+          try { const wr = await fetch('/admin/api/collab/whoami'); if (wr.status===200) collabProviders = (await wr.json()).providers || []; } catch(_) {}
+          applyRoleUI();
+          loadStats();
+          statsTimer = setInterval(loadStats, 5000);
+          return;
+        }
+        // admin:继续正常 loadConfig(鉴权走 cookie,无需 Bearer)
+      }
+    } catch(_) {}
+  }
   try { await loadConfig(); } catch(e){ if (e.message !== 'NEED_AUTH') toast('加载配置失败：' + e.message, 'err'); }
   loadStats();
   statsTimer = setInterval(loadStats, 5000);

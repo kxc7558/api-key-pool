@@ -1612,13 +1612,16 @@ function isTrustedOrigin(origin, reqHost) {
   }
 }
 
-/** 管理接口鉴权：未设 adminToken 时仅本机可访问；设了则需 Bearer adminToken（本机/远程一律） */
+/** 管理接口鉴权：未设 adminToken 时仅本机可访问；设了则需 Bearer adminToken（本机/远程一律）。
+ *  网页登录（cookie 会话）的 admin/collab 角色同样放行——管理台从门户跳转过来时无 Bearer 头。 */
 function adminAllowed(req) {
   const t = CONFIG.adminToken;
   if (!t) return isLoopbackReq(req);
-  const auth = String(req.headers.authorization || '');
-  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim();
-  return token === t;
+  if (extractBearer(req) === t) return true;
+  // cookie 会话角色:admin 全过;collab 只过 collab 专用接口(在路由层再细分)
+  const cur = currentUser(req);
+  if (cur && (cur.user.role === 'admin')) return true;
+  return false;
 }
 
 /** 从请求里提取 Bearer token（无前缀也接受，与 adminAllowed 一致） */
@@ -1627,8 +1630,14 @@ function extractBearer(req) {
   return auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim();
 }
 
-/** 协同管理员：collabTokens 里登记的 token。可上传上游 Key、生成分发 Key，不可改其他配置 */
+/** 协同管理员：collabTokens 里登记的 token。可上传上游 Key、生成分发 Key，不可改其他配置。
+ *  网页登录的 collab 角色用户(cookie 会话)拥有同等权限。 */
 function resolveCollab(req) {
+  const viaSession = (() => {
+    const cur = currentUser(req);
+    return (cur && cur.user.role === 'collab') ? { token: '(session)', name: cur.user.name.replace(/^collab:/, '') } : null;
+  })();
+  if (viaSession) return viaSession;
   const collab = CONFIG.collabTokens;
   if (!collab || typeof collab !== 'object' || Array.isArray(collab)) return null;
   const t = extractBearer(req);
@@ -1703,10 +1712,11 @@ async function handleCollabApi(req, res, url, collab) {
       const finalName = count > 1 ? `${name}${i + 1}` : name;
       raw.accessKeys[key] = { name: finalName, rpm, daily };
       created.push({ key, name: finalName, rpm, daily });
-      // 记录创建者，供协同管理员之后查看自己发的 Key
-      if (collab.token !== '(admin)') {
-        if (!COLLAB_CREATED.has(collab.token)) COLLAB_CREATED.set(collab.token, []);
-        COLLAB_CREATED.get(collab.token).push(key);
+      // 记录创建者，供协同管理员之后查看自己发的 Key（网页会话身份记在 collab:名字 下）
+      const creatorKey = collab.token === '(session)' ? collab.name : collab.token;
+      if (creatorKey !== '(admin)') {
+        if (!COLLAB_CREATED.has(creatorKey)) COLLAB_CREATED.set(creatorKey, []);
+        COLLAB_CREATED.get(creatorKey).push(key);
       }
     }
     save();
@@ -2326,7 +2336,7 @@ const server = http.createServer(async (req, res) => {
           : [];
         return sendJson(res, 200, { ok: true, name: collab.name, role: collab.token === '(admin)' ? 'admin' : 'collab', providers });
       }
-      // 协同管理员：列出自己创建的分发 Key（按创建记录；管理员则列出全部）
+      // 协同管理员：列出自己创建的分发 Key（按创建记录；管理员/网页会话则列出全部）
       if (p === '/admin/api/collab/listAccessKeys' && req.method === 'GET') {
         let list = [];
         if (collab.token === '(admin)') {
@@ -2334,6 +2344,18 @@ const server = http.createServer(async (req, res) => {
             const o = typeof spec === 'object' ? spec : { name: String(spec) };
             return { key: token, name: o.name || '', rpm: o.rpm || 0, daily: o.daily || 0 };
           });
+        } else if (collab.token === '(session)') {
+          // 网页登录的协同管理员:看与自己 collab:名字 同源的 Key(名字匹配)
+          const myName = collab.name;
+          list = Object.entries(CONFIG.accessKeys || {})
+            .filter(([token, spec]) => {
+              const o = typeof spec === 'object' ? spec : { name: String(spec) };
+              return (COLLAB_CREATED.get(myName) || []).includes(token) || o.name === myName;
+            })
+            .map(([token, spec]) => {
+              const o = typeof spec === 'object' ? spec : { name: String(spec) };
+              return { key: token, name: o.name || '', rpm: o.rpm || 0, daily: o.daily || 0 };
+            });
         } else {
           const rec = COLLAB_CREATED.get(collab.token) || [];
           list = rec.map((k) => {
