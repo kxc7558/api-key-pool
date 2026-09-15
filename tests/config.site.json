@@ -1,90 +1,95 @@
 {
- "host": "127.0.0.1",
- "port": 8894,
- "maxAttempts": 10,
- "waitForSlotMs": 1500,
- "cooldownMs": 2000,
- "maxCooldownMs": 5000,
- "serverErrorCooldownMs": 500,
- "requestTimeoutMs": 15000,
- "strategy": "round-robin",
- "logLevel": "warn",
- "defaults": {
-  "rpmPerKey": 0,
-  "maxConcurrencyPerKey": 0
- },
- "providers": [
-  {
-   "name": "mockA",
-   "baseUrl": "http://127.0.0.1:8899/v1",
-   "rpmPerKey": 0,
-   "rpmPerAccount": 40,
-   "keys": [
-    "BAD1@acct0",
-    "MOCK-A2@acct1",
-    "MOCK-A3@acct1"
-   ]
+  "host": "127.0.0.1",
+  "port": 8894,
+  "maxAttempts": 10,
+  "waitForSlotMs": 1500,
+  "cooldownMs": 2000,
+  "maxCooldownMs": 5000,
+  "serverErrorCooldownMs": 500,
+  "requestTimeoutMs": 15000,
+  "strategy": "round-robin",
+  "logLevel": "warn",
+  "defaults": {
+    "rpmPerKey": 0,
+    "maxConcurrencyPerKey": 0
   },
-  {
-   "name": "mockB",
-   "baseUrl": "http://127.0.0.1:8899/v1",
-   "keys": [
-    "RATE1",
-    "MOCK-B2"
-   ]
-  },
-  {
-   "name": "mockC",
-   "baseUrl": "http://127.0.0.1:8899/v1",
-   "rpmPerKey": 0,
-   "rpmPerAccount": 2,
-   "keys": [
-    "MOCK-C1@grp1",
-    "MOCK-C2@grp1"
-   ]
-  },
-  {
-   "name": "mockStream",
-   "baseUrl": "http://127.0.0.1:8899/v1",
-   "normalizeEmptyFinishReason": true,
-   "keys": [
-    "EMPTY_FINISH"
-   ]
-  }
- ],
- "models": {
-  "auto": [
-   {
-    "provider": "mockA",
-    "model": "mock-model"
-   },
-   {
-    "provider": "mockB",
-    "model": "mock-model"
-   }
+  "providers": [
+    {
+      "name": "mockA",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "rpmPerKey": 0,
+      "rpmPerAccount": 40,
+      "keys": [
+        "BAD1@acct0",
+        "MOCK-A2@acct1",
+        "MOCK-A3@acct1"
+      ]
+    },
+    {
+      "name": "mockB",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": [
+        "RATE1",
+        "MOCK-B2"
+      ]
+    },
+    {
+      "name": "mockC",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "rpmPerKey": 0,
+      "rpmPerAccount": 2,
+      "keys": [
+        "MOCK-C1@grp1",
+        "MOCK-C2@grp1"
+      ]
+    },
+    {
+      "name": "mockStream",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "normalizeEmptyFinishReason": true,
+      "keys": [
+        "EMPTY_FINISH"
+      ]
+    }
   ],
-  "grouped": [
-   {
-    "provider": "mockC",
-    "model": "mock-model"
-   }
-  ],
-  "empty-finish": [
-   {
-    "provider": "mockStream",
-    "model": "mock-model"
-   }
-  ]
- },
- "accessKeys": {
-  "sk-pool-testuser0000000000000000000000": {
-   "name": "测试用户A",
-   "rpm": 100,
-   "daily": 1000
+  "models": {
+    "auto": [
+      {
+        "provider": "mockA",
+        "model": "mock-model"
+      },
+      {
+        "provider": "mockB",
+        "model": "mock-model"
+      }
+    ],
+    "grouped": [
+      {
+        "provider": "mockC",
+        "model": "mock-model"
+      }
+    ],
+    "empty-finish": [
+      {
+        "provider": "mockStream",
+        "model": "mock-model"
+      }
+    ]
+  },
+  "accessKeys": {
+    "sk-pool-testuser0000000000000000000000": {
+      "name": "测试用户A",
+      "rpm": 100,
+      "daily": 1000
+    },
+    "sk-pool-yujm8rsi1cz1jml7g9amw0a4p4912vw7": {
+      "name": "协同发的",
+      "rpm": 5,
+      "daily": 100
+    }
+  },
+  "adminToken": "adm-test-token",
+  "collabTokens": {
+    "collab-test-token": "协同测试员"
   }
- },
- "adminToken": "adm-test-token",
- "collabTokens": {
-  "collab-test-token": "协同测试员"
- }
 }

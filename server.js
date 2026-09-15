@@ -1746,8 +1746,30 @@ const USERS_PATH = path.join(ROOT, 'users.json');
 const USERS = { byName: new Map(), byId: new Map() };        // name -> user, id -> user
 const SESSIONS = new Map();                                  // sid -> { userId, name, role, createdAt }
 const CAPTCHAS = new Map();                                  // cid -> { text, expiresAt }
+const AUTH_FAILS = new Map();                                // key(ip:name) -> { count, until } 登录失败限流
+const REGISTER_HITS = new Map();                             // ip -> [时间戳] 注册频率限制
 const COLLAB_CREATED = new Map();                            // collabToken -> [accessKey...]（协同管理员创建的分发 Key 记录）
 const COOKIE_NAME = 'akp_session';
+const AUTH_FAIL_LIMIT = 5;                                   // 同一 IP+账号 连续失败次数上限
+const AUTH_LOCK_MS = 5 * 60000;                              // 超限锁定 5 分钟
+
+/** 登录/注册失败限流：验证码是 SVG 文本、可被脚本解析，真正的防爆破靠这里 */
+function authRateKey(req, name){
+  const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
+  return ip + ':' + String(name || '').slice(0, 32);
+}
+function authRateBlocked(key){
+  const rec = AUTH_FAILS.get(key);
+  if (rec && rec.until > Date.now()) return Math.ceil((rec.until - Date.now()) / 1000);
+  return 0;
+}
+function authRateFail(key){
+  const rec = AUTH_FAILS.get(key) || { count: 0, until: 0 };
+  rec.count += 1;
+  if (rec.count >= AUTH_FAIL_LIMIT) { rec.until = Date.now() + AUTH_LOCK_MS; rec.count = 0; }
+  AUTH_FAILS.set(key, rec);
+}
+function authRateReset(key){ AUTH_FAILS.delete(key); }
 
 function hashPassword(password, salt) {
   salt = salt || crypto.randomBytes(16).toString('hex');
@@ -1795,6 +1817,11 @@ setInterval(() => {
   const now = Date.now();
   for (const [sid, s] of SESSIONS) if (now - s.createdAt > 7 * 86400000) SESSIONS.delete(sid);
   for (const [cid, c] of CAPTCHAS) if (c.expiresAt < now) CAPTCHAS.delete(cid);
+  for (const [k, rec] of AUTH_FAILS) if (rec.until && rec.until < now && !rec.count) AUTH_FAILS.delete(k);
+  for (const [ip, hits] of REGISTER_HITS) {
+    const keep = hits.filter(t => now - t < 3600000);
+    if (keep.length) REGISTER_HITS.set(ip, keep); else REGISTER_HITS.delete(ip);
+  }
 }, 5 * 60000);
 
 function parseCookies(req) {
@@ -1864,6 +1891,11 @@ function handleAuthApi(req, res, p) {
 
     if (p === '/api/auth/register' && req.method === 'POST') {
       const { name, password, captchaId, captchaText } = body;
+      // 注册频率限制：同一 IP 每小时最多 5 次成功注册（防批量刷账号）
+      const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
+      const now = Date.now();
+      const hits = (REGISTER_HITS.get(ip) || []).filter(t => now - t < 3600000);
+      if (hits.length >= 5) { REGISTER_HITS.set(ip, hits); return sendJson(res, 429, { error: { message: '注册过于频繁，请稍后再试', type: 'rate_limit_error' } }); }
       if (!name || String(name).length < 2 || String(name).length > 24) return sendJson(res, 400, { error: { message: '用户名需 2~24 个字符', type: 'invalid_request_error' } });
       if (!/^[a-zA-Z0-9_一-龥]+$/.test(name)) return sendJson(res, 400, { error: { message: '用户名只能包含中英文、数字、下划线', type: 'invalid_request_error' } });
       if (!password || String(password).length < 6) return sendJson(res, 400, { error: { message: '密码至少 6 位', type: 'invalid_request_error' } });
@@ -1875,6 +1907,7 @@ function handleAuthApi(req, res, p) {
       const { salt, hash } = hashPassword(password);
       const user = { id: crypto.randomBytes(8).toString('hex'), name, salt, hash, role: 'user', createdAt: Date.now() };
       USERS.byName.set(name, user); USERS.byId.set(user.id, user); saveUsers();
+      hits.push(now); REGISTER_HITS.set(ip, hits);
       const sid = crypto.randomBytes(16).toString('hex');
       SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
       log('info', `新用户注册：${name}`, 'green');
@@ -1884,9 +1917,15 @@ function handleAuthApi(req, res, p) {
 
     if (p === '/api/auth/login' && req.method === 'POST') {
       const { name, password, captchaId, captchaText } = body;
+      const rlKey = authRateKey(req, name);
+      const blockedSec = authRateBlocked(rlKey);
+      if (blockedSec > 0) {
+        res.setHeader('retry-after', String(blockedSec));
+        return sendJson(res, 429, { error: { message: `尝试过于频繁，请 ${Math.ceil(blockedSec/60)} 分钟后再试`, type: 'rate_limit_error' } });
+      }
       const cap = CAPTCHAS.get(String(captchaId || ''));
       if (!cap || cap.expiresAt < Date.now()) return sendJson(res, 400, { error: { message: '验证码已过期，请刷新', type: 'captcha_error' } });
-      if (String(captchaText || '').toLowerCase() !== cap.text) { CAPTCHAS.delete(String(captchaId || '')); return sendJson(res, 400, { error: { message: '验证码错误', type: 'captcha_error' } }); }
+      if (String(captchaText || '').toLowerCase() !== cap.text) { CAPTCHAS.delete(String(captchaId || '')); authRateFail(rlKey); return sendJson(res, 400, { error: { message: '验证码错误', type: 'captcha_error' } }); }
       CAPTCHAS.delete(String(captchaId || ''));
 
       // 管理员/协同管理员登录：password 即 adminToken / collab token。
@@ -1896,7 +1935,7 @@ function handleAuthApi(req, res, p) {
       const collabName = collabCfg[password];
       if (isAdminToken || collabName) {
         const role = isAdminToken ? 'admin' : 'collab';
-        const uname = isAdminToken ? 'admin' : (USERS.byName.has('collab:' + collabName) ? 'collab:' + collabName : 'collab:' + collabName);
+        const uname = isAdminToken ? 'admin' : 'collab:' + collabName;
         let user = USERS.byName.get(uname);
         if (!user) {
           const { salt, hash } = hashPassword(password);
@@ -1909,6 +1948,7 @@ function handleAuthApi(req, res, p) {
           const { salt, hash } = hashPassword(password);
           user.salt = salt; user.hash = hash; saveUsers();
         }
+        authRateReset(rlKey);
         const sid = crypto.randomBytes(16).toString('hex');
         SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
         res.setHeader('set-cookie', `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
@@ -1916,7 +1956,11 @@ function handleAuthApi(req, res, p) {
       }
 
       const user = USERS.byName.get(String(name || ''));
-      if (!user || !verifyPassword(password, user.salt, user.hash)) return sendJson(res, 401, { error: { message: '用户名或密码错误', type: 'auth_error' } });
+      if (!user || !verifyPassword(password, user.salt, user.hash)) {
+        authRateFail(rlKey);
+        return sendJson(res, 401, { error: { message: '用户名或密码错误', type: 'auth_error' } });
+      }
+      authRateReset(rlKey);
       const sid = crypto.randomBytes(16).toString('hex');
       SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
       res.setHeader('set-cookie', `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
@@ -2289,11 +2333,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 403, { error: { message: '跨站来源被拒绝', type: 'forbidden' } });
     }
 
-    // 设置 adminToken 后，/stats 与 /（仪表盘）也要求管理鉴权（本机免密 / 远程 Bearer），防止公网暴露统计
-    // 门户首页（网站地基）
-    if ((p === '/' || p === '/home') && req.method === 'GET') return handleStaticFile(res, 'home.html', 'text/html');
-    // 登录后用户门户
-    if (p === '/portal' && req.method === 'GET') return handleStaticFile(res, 'portal.html', 'text/html');
+    // SPA 网站地基(new-api 式:单页应用,hash 路由,页面+API 同端口)
+    if (['/', '/app', '/console', '/login', '/register'].includes(p) && req.method === 'GET') return handleStaticFile(res, 'app.html', 'text/html');
+    if (p === '/app.js' && req.method === 'GET') return handleStaticFile(res, 'app.js', 'application/javascript');
+    // 旧页面路径 → SPA 对应 hash 路由(301 兼容旧链接)
+    const redirects = { '/admin': '/app#/console/dashboard', '/admin/': '/app#/console/dashboard', '/portal': '/app#/console/profile', '/home': '/app#/', '/dashboard': '/app#/console/dashboard' };
+    if (redirects[p] && req.method === 'GET') { res.writeHead(301, { location: redirects[p] }); return res.end(); }
     if (p === '/dashboard' && req.method === 'GET') {
       if (CONFIG.adminToken && !adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: '管理鉴权失败', type: 'auth_error' } });
       return handleDashboard(res);
