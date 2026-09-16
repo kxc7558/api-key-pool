@@ -1050,6 +1050,7 @@ function userQuotaCheck(user, now) {
   user.dailyCount++;
   user.totalCalls++;
   user.lastCallAt = now;
+  scheduleSaveUsageState();   // 记账后落盘（3 秒节流），重启不丢配额
   return { ok: true };
 }
 
@@ -1059,6 +1060,79 @@ function maskAccessToken(t) {
   return `${t.slice(0, 7)}…${t.slice(-4)}`;
 }
 
+// ---------------------------------------------------------------- 候选级失效标记
+// 上游明确说「这个模型没了」时（404 模型不存在 / 410 已下线），问题不在 Key 也不在客户端，
+// 而在「平台+模型」这个组合本身 —— 标记它失效一段时间，期间不再选它，避免每次请求白试一次。
+const DEAD_TARGETS = new Map();      // "provider:model" -> { until, reason }
+const TARGET_DEAD_MS = 3600000;      // 失效保持 1 小时（配置改了/上游恢复了会自动过期）
+
+function targetKey(target) { return `${target.provider.name}:${target.model}`; }
+function markTargetDead(target, reason) {
+  const k = targetKey(target);
+  const prev = DEAD_TARGETS.get(k);
+  DEAD_TARGETS.set(k, { until: Date.now() + TARGET_DEAD_MS, reason: String(reason) });
+  if (!prev) log('warn', `候选失效 ${k}（${reason}）—— 1 小时内不再选用；请到「模型」页检查该模型是否已下线`, 'yellow');
+}
+function targetDeadReason(target) {
+  const k = targetKey(target);
+  const rec = DEAD_TARGETS.get(k);
+  if (!rec) return null;
+  if (rec.until <= Date.now()) { DEAD_TARGETS.delete(k); return null; }
+  return rec.reason;
+}
+
+// ---------------------------------------------------------------- 用户用量持久化
+// 把每个分发用户的当日计数/累计调用落盘：重启后配额不再被重置（也就不能被用来超额），面板读数可信。
+const USAGE_STATE_PATH = path.join(ROOT, 'usage-state.json');
+let usageSaveTimer = null;
+let usageStateLoaded = false;
+
+/** 从磁盘恢复用户用量（仅在进程首次启动时调用一次） */
+function loadUsageState() {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(USAGE_STATE_PATH, 'utf8')); }
+  catch (_) { return; }                                   // 首次运行无此文件，正常
+  const users = (data && data.users) || {};
+  let restored = 0;
+  for (const [token, rec] of Object.entries(users)) {
+    const u = accessUsers.get(token) || disabledUsers.get(token);
+    if (!u || !rec) continue;
+    if (typeof rec.dailyCount === 'number') u.dailyCount = rec.dailyCount;
+    if (rec.dailyDate) u.dailyDate = rec.dailyDate;
+    if (typeof rec.totalCalls === 'number') u.totalCalls = rec.totalCalls;
+    if (typeof rec.lastCallAt === 'number') u.lastCallAt = rec.lastCallAt;
+    restored++;
+  }
+  if (restored) log('info', `已恢复 ${restored} 个用户的用量计数（跨重启不丢）`, 'green');
+}
+/** 首次启动才从磁盘读；热重载时内存计数才是最新的，不能被磁盘旧值覆盖 */
+function loadUsageStateOnce() {
+  if (usageStateLoaded) return;
+  usageStateLoaded = true;
+  loadUsageState();
+}
+function saveUsageState() {
+  try {
+    const users = {};
+    for (const [token, u] of accessUsers) {
+      users[token] = { dailyCount: u.dailyCount || 0, dailyDate: u.dailyDate || '', totalCalls: u.totalCalls || 0, lastCallAt: u.lastCallAt || 0 };
+    }
+    for (const [token, u] of disabledUsers) {            // 被禁用的也存，重新启用时计数仍在
+      if (!users[token]) users[token] = { dailyCount: u.dailyCount || 0, dailyDate: u.dailyDate || '', totalCalls: u.totalCalls || 0, lastCallAt: u.lastCallAt || 0 };
+    }
+    const json = JSON.stringify({ savedAt: Date.now(), users }, null, 2);
+    const tmp = USAGE_STATE_PATH + '.tmp';
+    fs.writeFileSync(tmp, json, 'utf8');
+    try { fs.renameSync(tmp, USAGE_STATE_PATH); }
+    catch (_) { fs.writeFileSync(USAGE_STATE_PATH, json, 'utf8'); try { fs.unlinkSync(tmp); } catch (_) {} }
+  } catch (_) { /* 写盘失败不影响服务 */ }
+}
+/** 3 秒节流落盘（请求高频时不至于每笔都写盘） */
+function scheduleSaveUsageState() {
+  if (usageSaveTimer) return;
+  usageSaveTimer = setTimeout(() => { usageSaveTimer = null; saveUsageState(); }, 3000);
+}
+
 function reloadConfig() {
   const raw = readJson(CONFIG_PATH);
   CONFIG = deepMerge(DEFAULT_CONFIG, raw);
@@ -1066,6 +1140,7 @@ function reloadConfig() {
   POOL.cfg = CONFIG;
   POOL.applyConfig(CONFIG);
   const n = loadAccessUsers(CONFIG.accessKeys);
+  loadUsageStateOnce();   // 首次启动恢复用量计数（热重载跳过，内存里的才是最新）
   // 热重载后半开参数可能变化：重启探活循环（启停跟随 enabled 开关）
   if (CONFIG.halfOpen && CONFIG.halfOpen.enabled !== false) startProbeLoop();
   else if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
@@ -1227,6 +1302,14 @@ async function attempt(slot, bodyObj, isStream, clientHeaders, abortSignal) {
       log('warn', `${status} 上游故障 ${slot.key.label}，换 Key`, 'yellow');
       return { kind: 'retry', status, text };
     }
+    // 404 模型不存在 / 410 模型已下线：问题在「平台+模型」这个组合，不在 Key 也不在客户端
+    // → 标记该候选失效并换下一个候选重试（此前误当 fatal，导致一个候选下线就整个请求失败）
+    if (status === 404 || status === 410) {
+      slot.key.fail(`${status}`);
+      markTargetDead(slot.target, status === 410 ? '410 已下线' : '404 不存在');
+      log('warn', `${status} 模型不可用（${slot.target.provider.name}:${slot.target.model}），换候选重试`, 'yellow');
+      return { kind: 'retry', status, text };
+    }
     // 其他 4xx：请求本身有问题，换 Key 也没用
     slot.key.fail(`${status} ${text.slice(0, 80)}`);
     log('warn', `${status} 客户端错误，不重试 ${slot.key.label}: ${text.slice(0, 200)}`, 'yellow');
@@ -1357,10 +1440,23 @@ async function handleChat(req, res, bodyObj) {
     });
   }
 
-  const targets = POOL.resolveTargets(model);
-  if (!targets.length) {
+  const targetsAll = POOL.resolveTargets(model);
+  if (!targetsAll.length) {
     logUsage(makeUsageEntry(req, { model, status: 400, latencyMs: Date.now() - tStart, errorType: 'no_target' }));
     return sendJson(res, 400, { error: { message: `未配置任何可用平台，请检查 config.json 的 providers`, type: 'invalid_request_error' } });
+  }
+  // 跳过已判定失效的候选（模型下线/不存在）：否则每次请求都会白试一次并可能把错误抛给客户端
+  const targets = targetsAll.filter((t) => !targetDeadReason(t));
+  if (!targets.length) {
+    const why = targetsAll.map((t) => `${t.provider.name}:${t.model}（${targetDeadReason(t)}）`).join('；');
+    logUsage(makeUsageEntry(req, { model, status: 503, latencyMs: Date.now() - tStart, errorType: 'all_targets_dead' }));
+    log('error', `别名「${model}」的候选全部失效：${why}`, 'red');
+    return sendJson(res, 503, {
+      error: {
+        message: `别名「${model}」的候选当前都不可用：${why}。请到管理台「模型」页把已下线的模型换掉（失效标记 1 小时后自动过期重试）`,
+        type: 'all_targets_dead',
+      },
+    });
   }
 
   const isStream = !!bodyObj.stream;
@@ -2599,6 +2695,12 @@ function main() {
   }
   server.listen(CONFIG.port, CONFIG.host, () => {
     cleanupLogs(); // 启动即清理一次过期日志（服务日志 7 天 / 调用日志 90 天）
+    // 用量兜底落盘：即使节流定时器被打断，每分钟也会写一次
+    setInterval(saveUsageState, 60000);
+    // 退出前尽量保存一次（Ctrl+C / systemctl stop）
+    const saveOnExit = () => { try { saveUsageState(); } catch (_) {} process.exit(0); };
+    process.on('SIGINT', saveOnExit);
+    process.on('SIGTERM', saveOnExit);
     banner();
     log('info', `服务已启动，策略=${CONFIG.strategy}，最大尝试=${CONFIG.maxAttempts}`, 'green');
     if (CONFIG.halfOpen && CONFIG.halfOpen.enabled !== false) {

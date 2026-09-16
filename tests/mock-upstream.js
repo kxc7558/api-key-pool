@@ -68,6 +68,11 @@ http.createServer((req, res) => {
     if (auth === 'ALWAYS429' || String(auth).startsWith('ALWAYS429_')) {
       return send(429, { error: { message: 'rate limited', code: 'rate_limit_error' } });
     }
+    // GONE1: 模拟上游模型下线（410 Gone）—— 验证代理池应换候选而不是把错误抛给客户端
+    if (String(auth).startsWith('GONE1')) {
+      return send(410, { type: 'about:blank', title: 'Gone', status: 410,
+        detail: "The model 'xxx' has reached its end of life and is no longer available." });
+    }
     if (auth === 'SLOW1') await new Promise((r) => setTimeout(r, 3000));
 
     const content = `[${auth} 第${n}次] 收到: ${JSON.stringify((body.messages || []).slice(-1)[0]?.content || '')}`;

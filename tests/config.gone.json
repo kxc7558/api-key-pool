@@ -1,0 +1,46 @@
+{
+ "host": "127.0.0.1",
+ "port": 8892,
+ "maxAttempts": 4,
+ "waitForSlotMs": 1000,
+ "cooldownMs": 1000,
+ "maxCooldownMs": 5000,
+ "serverErrorCooldownMs": 500,
+ "requestTimeoutMs": 10000,
+ "logLevel": "warn",
+ "halfOpen": {
+  "enabled": false
+ },
+ "defaults": {
+  "rpmPerKey": 0,
+  "maxConcurrencyPerKey": 0
+ },
+ "providers": [
+  {
+   "name": "goneP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "keys": [
+    "GONE1"
+   ]
+  },
+  {
+   "name": "okP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "keys": [
+    "MOCK-OK1"
+   ]
+  }
+ ],
+ "models": {
+  "t": [
+   {
+    "provider": "goneP",
+    "model": "dead-model"
+   },
+   {
+    "provider": "okP",
+    "model": "mock-model"
+   }
+  ]
+ }
+}

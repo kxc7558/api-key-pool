@@ -121,6 +121,7 @@ api-key-pool 操作 CLI  —— 目标: ${BASE}
 高风险写（必须加 --yes）:
   del-user <Key或用户名>
   del-alias <别名>
+  del-candidate <别名> <平台>:<模型>    从别名里移除一个候选（模型下线时用）
   del-provider <平台名>
 
 配置:
@@ -297,6 +298,25 @@ CMD['del-alias'] = async () => {
   needYes(`删除模型别名「${alias}」`);
   delete cfg.models[alias];
   await saveCfg(cfg, 'del-alias', `已删除别名「${alias}」`);
+};
+
+CMD['del-candidate'] = async () => {
+  const alias = pos[0], spec = pos[1];
+  if (!alias || !spec || !spec.includes(':')) die('用法: del-candidate <别名> <平台>:<模型> [--yes]');
+  const [provider, ...rest] = spec.split(':');
+  const model = rest.join(':');
+  const cfg = await loadCfg();
+  const arr = cfg.models && cfg.models[alias];
+  if (!arr) die(`找不到别名「${alias}」`);
+  const list = Array.isArray(arr) ? arr.slice() : [arr];
+  const idx = list.findIndex((t) => (t.provider || '') === provider && (t.model || '') === model);
+  if (idx < 0) die(`别名「${alias}」里没有候选「${spec}」。现有：${list.map((t) => t.provider + ':' + t.model).join(', ')}`);
+  if (list.length <= 1) die('只剩这一个候选了——要整个删请用 del-alias');
+  needYes(`从别名「${alias}」移除候选「${spec}」`);
+  list.splice(idx, 1);
+  cfg.models[alias] = list;
+  await saveCfg(cfg, 'del-candidate', `别名「${alias}」已移除候选 ${spec}`);
+  P(`剩余候选：${list.map((t) => t.provider + ':' + t.model + (t.fallback ? '[兜底]' : '')).join(', ')}`);
 };
 
 CMD['del-provider'] = async () => {

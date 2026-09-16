@@ -48,6 +48,7 @@ node scripts/key-pool.js set-strategy latency-first    # 要快；cost-first 省
 ```bash
 node scripts/key-pool.js del-user 张三 --yes
 node scripts/key-pool.js del-alias fast --yes
+node scripts/key-pool.js del-candidate auto nvidia:deepseek-ai/xxx --yes   # 模型下线时移除该候选
 node scripts/key-pool.js del-provider nvidia --yes     # 会提示被哪些别名引用
 ```
 
@@ -72,6 +73,10 @@ node scripts/key-pool.js del-provider nvidia --yes     # 会提示被哪些别�
 6. **客户端的 base_url 不要带 `/v1`**（有的客户端会再拼一次 → `/v1/v1/...` 404）。
 7. **改云端配置后必须重启服务**——`fs.watch` 热重载对 scp 覆盖不可靠。
 8. **scp config.json 会覆盖云端配置**——云端可能被用户在管理台改过，**优先用 CLI 改**（走 API，不整文件覆盖）。
+9. **上游模型会下线**（实测：英伟达 `deepseek-ai/deepseek-v4-pro-0813` 于 2026-09-14 到达 EOL，返回 `410 Gone`）。
+   现在代理池已把它当"候选不可用"处理：**换候选重试 + 标记该「平台:模型」失效 1 小时**，不再把 410 抛给客户端。
+   遇到"某别名调用全失败且报 4xx"时，先 `models` 看候选里有没有已下线的，用 `del-candidate` 清掉。
+   **顺带教训**：配置里别留长期没验证过的兜底候选（尤其慢/不稳的平台），它会成为隐形单点。
 
 ## ⑤ 排障顺序（用户说"不对了/很慢/总失败"）
 
