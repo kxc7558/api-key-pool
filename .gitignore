@@ -17,3 +17,7 @@ node_modules/
 
 # WorkBuddy 项目内部数据（非源码）
 .workbuddy/
+
+# 用户用量状态（含分发的 Key）
+usage-state.json
+usage-state.json.tmp

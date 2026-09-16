@@ -72,6 +72,7 @@ async function fetchMe(){
 
 /* ================= 侧栏 & 顶栏 ================= */
 const MENU = [
+  { hash:'#/console/agent',      icon:'user',   text:'数字员工',   roles:['admin','collab'] },
   { hash:'#/console/dashboard',  icon:'pulse',  text:'运行状态',   roles:['admin'] },
   { hash:'#/console/keys',       icon:'key',    text:'密钥管理',   roles:['admin'] },
   { hash:'#/console/models',     icon:'layers', text:'模型',       roles:['admin'] },
@@ -83,6 +84,7 @@ const MENU = [
   { hash:'#/console/profile',    icon:'user',   text:'个人中心',   roles:['admin','collab','user'] },
 ];
 const PAGE_TITLES = {
+  '#/console/agent':'数字员工',
   '#/console/dashboard':'运行状态', '#/console/keys':'密钥管理', '#/console/models':'模型',
   '#/console/tokens':'分发密钥', '#/console/logs':'使用记录', '#/console/usage':'用量统计',
   '#/console/playground':'试一下', '#/console/settings':'设置', '#/console/profile':'个人中心',
@@ -91,7 +93,7 @@ const PAGE_TITLES = {
 function renderShell(title, contentHTML, opts){
   opts = opts || {};
   const items = MENU.filter(m => m.roles.includes(role));
-  const showSave = role === 'admin';
+  const showSave = role === 'admin' && !opts.hideSave;
   $shell.innerHTML = `
   <aside id="sidebar">
     <div class="brand">
@@ -135,6 +137,7 @@ const ROUTES = [
   { path:'#/',            view: viewHome,      public:true },
   { path:'#/login',       view: viewAuth,      public:true, mode:'login' },
   { path:'#/register',    view: viewAuth,      public:true, mode:'register' },
+  { path:'#/console/agent',      view: pageAgent,     roles:['admin','collab'] },
   { path:'#/console/dashboard',  view: pageDashboard, roles:['admin'] },
   { path:'#/console/keys',       view: pageKeys,      roles:['admin'] },
   { path:'#/console/models',     view: pageModels,    roles:['admin'] },
@@ -1096,6 +1099,241 @@ function resultBox(r){
   const usage = r.usage ? `<div class="meta">tokens: ${r.usage.prompt_tokens}+${r.usage.completion_tokens}=${r.usage.total_tokens||'-'}</div>` : '';
   return `<div class="box"><div class="meta">model: ${esc(r.model)} · 耗时 ${r.ms}ms${r.stream?'（流式）':''}</div>
     <pre>${esc(r.content||'(内容为空——可能 max_tokens 太小被思考过程吃光,试试调大)')}</pre>${reasoning}${usage}</div>`;
+}
+
+/* ================= 页面:数字员工（对话窗口） ================= */
+let agentHistory = [];
+let agentBusy = false;
+let agentCfgCache = null;
+
+function pageAgent(){
+  document.title = '数字员工 · API Key 代理池';
+  renderShell('数字员工', `
+  <div class="agent-box">
+    <div class="agent-head">
+      <div class="agent-title">
+        <span class="agent-avatar">员</span>
+        <div>
+          <b>代理池操作员</b>
+          <div class="hint" id="agent-model-hint">加载中…</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn sm" id="agent-cfg-btn">设置</button>
+        <button class="btn sm" id="agent-clear">清空</button>
+      </div>
+    </div>
+    <div class="agent-msgs" id="agent-msgs"></div>
+    <div class="agent-input">
+      <textarea id="agent-text" rows="2" placeholder="问它点什么，或让它去查/去改——比如「看看池子现在什么状态」（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button class="btn primary" id="agent-send">发送</button>
+    </div>
+  </div>`, { hideAddr: true, hideSave: true });
+
+  const msgs = document.getElementById('agent-msgs');
+  if (!agentHistory.length){
+    msgs.innerHTML = `<div class="agent-welcome">
+      <b>你好，我是这台代理池的数字员工。</b><br>
+      我能直接查（也会按权限去改）这台代理池，你问就行。比如：<br>
+      <span class="agent-chip" data-q="看看代理池现在什么状态">看看代理池现在什么状态</span>
+      <span class="agent-chip" data-q="最近有没有调用失败？">最近有没有调用失败</span>
+      <span class="agent-chip" data-q="英伟达那个 Key 还能用吗">英伟达那个 Key 还能用吗</span>
+      <span class="agent-chip" data-q="用量趋势怎么样">用量趋势怎么样</span>
+    </div>`;
+  } else {
+    for (const h of agentHistory) msgs.insertAdjacentHTML('beforeend', agentBubble(h.role, esc(h.content)));
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+  msgs.addEventListener('click', (e) => {
+    const chip = e.target.closest('.agent-chip'); if (!chip) return;
+    document.getElementById('agent-text').value = chip.dataset.q;
+    agentSend();
+  });
+  document.getElementById('agent-clear').addEventListener('click', () => {
+    agentHistory = []; pageAgent();
+  });
+  document.getElementById('agent-send').addEventListener('click', agentSend);
+  const ta = document.getElementById('agent-text');
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); agentSend(); }
+  });
+  document.getElementById('agent-cfg-btn').addEventListener('click', agentOpenSettings);
+  loadAgentCfg();
+  ta.focus();
+}
+
+function agentBubble(role, html){
+  return `<div class="agent-msg ${role === 'user' ? 'user' : 'bot'}">${html}</div>`;
+}
+function agentPush(role, html){
+  const box = document.getElementById('agent-msgs');
+  if (!box) return null;
+  box.insertAdjacentHTML('beforeend', agentBubble(role, html));
+  const el = box.lastElementChild;
+  box.scrollTop = box.scrollHeight;
+  return el;
+}
+
+async function agentSend(){
+  if (agentBusy) return;
+  const ta = document.getElementById('agent-text');
+  const msg = (ta.value || '').trim();
+  if (!msg) return;
+  ta.value = '';
+  agentBusy = true;
+  const sendBtn = document.getElementById('agent-send');
+  if (sendBtn){ sendBtn.disabled = true; sendBtn.textContent = '回复中…'; }
+  const box = document.getElementById('agent-msgs');
+  if (box && box.querySelector('.agent-welcome')) box.innerHTML = '';
+  agentPush('user', esc(msg));
+
+  const bot = agentPush('bot', '<div class="body"><span class="agent-thinking">思考中…</span></div><div class="tools"></div>');
+  const bodyEl = bot ? bot.querySelector('.body') : null;
+  const toolsEl = bot ? bot.querySelector('.tools') : null;
+  let answer = '';
+  const scroll = () => { const b = document.getElementById('agent-msgs'); if (b) b.scrollTop = b.scrollHeight; };
+  const setText = (t) => {
+    if (!bodyEl) return;
+    bodyEl.innerHTML = esc(t).replace(/\n/g, '<br>');
+    scroll();
+  };
+  /* 过程可见：每个工具调用占一块，显示**真正跑的命令**，输出可展开看原文 */
+  const pendingTools = [];
+  const addTool = (e) => {
+    if (!toolsEl) return;
+    if (e.status === 'running'){
+      toolsEl.insertAdjacentHTML('beforeend',
+        `<div class="agent-tool" data-state="running">🔧 正在执行 <span class="cmd">${esc(e.cmd || e.name)}</span>…</div>`);
+      pendingTools.push(toolsEl.lastElementChild);
+    } else {
+      const block = pendingTools.shift() || toolsEl.lastElementChild;
+      if (!block) return;
+      const out = String(e.result || '');
+      block.dataset.state = e.failed ? 'error' : 'done';
+      block.innerHTML = `🔧 执行了 <span class="cmd">${esc(e.cmd || e.name)}</span>`
+        + (out ? ` <details><summary>看输出（${out.length} 字符）</summary><pre>${esc(out)}</pre></details>`
+               : ' <span class="faint">（无输出）</span>');
+    }
+    scroll();
+  };
+
+  try {
+    const headers = { 'content-type': 'application/json' };
+    if (token) headers['authorization'] = 'Bearer ' + token;
+    const resp = await fetch('/api/agent/chat', {
+      method: 'POST', headers, credentials: 'include',
+      body: JSON.stringify({ message: msg, history: agentHistory.slice(-8) }),
+    });
+    if (!resp.ok){
+      const t = await resp.text().catch(() => '');
+      setText('调用失败：HTTP ' + resp.status + ' ' + t.slice(0, 200));
+      agentBusy = false;
+      if (sendBtn){ sendBtn.disabled = false; sendBtn.textContent = '发送'; }
+      return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true){
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines){
+        if (!line.startsWith('data: ')) continue;
+        let e; try { e = JSON.parse(line.slice(6)); } catch (_) { continue; }
+        if (e.type === 'text'){ answer += (answer ? '\n\n' : '') + e.text; setText(answer); }
+        else if (e.type === 'tool'){ addTool(e); }
+        else if (e.type === 'error'){ answer += (answer ? '\n\n' : '') + '⚠️ ' + e.text; setText(answer); }
+      }
+    }
+  } catch (err){
+    answer += (answer ? '\n\n' : '') + '⚠️ 网络错误：' + err.message;
+    setText(answer);
+  }
+  if (answer.trim()) agentHistory.push({ role: 'user', content: msg }, { role: 'assistant', content: answer });
+  agentBusy = false;
+  if (sendBtn){ sendBtn.disabled = false; sendBtn.textContent = '发送'; }
+}
+
+async function loadAgentCfg(){
+  try {
+    const r = await api('GET', '/api/agent/config');
+    if (r.status === 200){
+      agentCfgCache = r.data;
+      const c = r.data.config || {};
+      const hint = document.getElementById('agent-model-hint');
+      if (hint) hint.textContent = `大脑：${c.model || 'auto'} · 后端：${r.data.baseEffective || '—'} · 写操作：${c.allowWrite ? '已开启' : '关闭（只读）'} · 最多 ${c.maxTurns || 6} 轮`;
+    }
+  } catch (_) {}
+}
+
+function agentOpenSettings(){
+  const c = (agentCfgCache && agentCfgCache.config) || {};
+  const tools = (agentCfgCache && agentCfgCache.tools) || [];
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = `<div class="box" style="width:460px">
+    <h3>数字员工设置</h3>
+    <div class="sub">配置员工用哪个模型、能做什么</div>
+    <div class="field"><label>大脑（用池子里的哪个模型别名）</label>
+      <input class="f mono" id="ag-model" value="${esc(c.model || 'auto')}" placeholder="auto">
+      <div class="hint">填池子的模型别名，如 auto / pro / flash / lite（额度最耐用的是 lite）</div></div>
+    <div class="field"><label>后端（员工对着哪个池子干活）</label>
+      <select class="f" id="ag-base">
+        <option value="">本部署（默认）——员工查自己所在的这个池子</option>
+        <option value="http://124.221.231.32:8787">云端 124.221.231.32:8787</option>
+        <option value="http://127.0.0.1:8787">本机 127.0.0.1:8787</option>
+        <option value="__custom__">自定义…</option>
+      </select>
+      <input class="f mono" id="ag-base-custom" style="display:none;margin-top:8px" placeholder="http://host:port">
+      <div class="hint" id="ag-base-now"></div></div>
+    <div class="field"><label>最多几轮工具调用（1~12）</label>
+      <input class="f" type="number" id="ag-turns" value="${c.maxTurns || 6}" min="1" max="12"></div>
+    <div class="field" style="display:flex;align-items:center;gap:8px">
+      <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text)">
+        <input type="checkbox" id="ag-write" ${c.allowWrite ? 'checked' : ''}> 允许员工执行写操作</label>
+      <span class="hint">默认关闭＝只能查不能改。开启后它能改别名、切策略等（仍受白名单限制）</span></div>
+    <div class="field"><label>它现在能做这些事</label>
+      <div class="hint" style="line-height:1.9">${tools.map((t) => `· <b>${esc(t.name)}</b> ${esc(t.desc)}${t.write ? ' <span style="color:var(--orange)">[写]</span>' : ''}`).join('<br>')}</div></div>
+    <div id="ag-err" style="display:none;color:var(--red);font-size:13px;margin:8px 0"></div>
+    <div class="row"><button class="btn" id="ag-cancel">取消</button><button class="btn primary" id="ag-save" style="flex:1">保存</button></div>
+  </div>`;
+  document.body.appendChild(mask);
+  mask.querySelector('#ag-cancel').onclick = () => mask.remove();
+  // 后端下拉：预设匹配不上就落到「自定义」，并把现值填进去
+  const baseSel = mask.querySelector('#ag-base');
+  const baseCustom = mask.querySelector('#ag-base-custom');
+  const PRESET_BASES = ['', 'http://124.221.231.32:8787', 'http://127.0.0.1:8787'];
+  const curBase = c.base || '';
+  if (PRESET_BASES.includes(curBase)){ baseSel.value = curBase; }
+  else { baseSel.value = '__custom__'; baseCustom.value = curBase; baseCustom.style.display = 'block'; }
+  const nowEl = mask.querySelector('#ag-base-now');
+  if (nowEl) nowEl.textContent = `当前实际生效：${(agentCfgCache && agentCfgCache.baseEffective) || '—'}`;
+  baseSel.onchange = () => {
+    const isCustom = baseSel.value === '__custom__';
+    baseCustom.style.display = isCustom ? 'block' : 'none';
+    if (isCustom) baseCustom.focus();
+  };
+  mask.querySelector('#ag-save').onclick = async () => {
+    const body = {
+      model: mask.querySelector('#ag-model').value.trim() || 'auto',
+      base: (baseSel.value === '__custom__' ? baseCustom.value : baseSel.value).trim(),
+      maxTurns: Number(mask.querySelector('#ag-turns').value) || 6,
+      allowWrite: mask.querySelector('#ag-write').checked,
+      enabled: true,
+    };
+    const r = await api('PUT', '/api/agent/config', body);
+    if (r.status !== 200){
+      const err = mask.querySelector('#ag-err');
+      err.textContent = (r.data && r.data.error && r.data.error.message) || '保存失败';
+      err.style.display = 'block';
+      return;
+    }
+    mask.remove();
+    toast('员工设置已保存', 'ok');
+    loadAgentCfg();
+  };
 }
 
 /* ================= 页面:个人中心 ================= */

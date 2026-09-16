@@ -41,6 +41,14 @@ const DEFAULT_CONFIG = {
   logLevel: 'info',         // debug | info | warn | error | silent
   adminToken: '',           // 操作台远程管理密码；留空 = 仅本机可管理
   collabTokens: {},         // 协同管理员：{ "token": "名字" } —— 可上传上游 Key / 生成分发 Key，不可改其他配置
+  agent: {                  // 数字员工对话（网页上的员工窗口）
+    enabled: true,
+    model: 'auto',          // 员工用池子里的哪个别名当大脑
+    base: '',               // 后端：CLI 连哪个池子。留空 = CLI 默认（云端）；可填 http://127.0.0.1:8787 等
+    maxTurns: 6,            // 最多几轮「思考 → 调工具」
+    allowWrite: false,      // 是否允许员工执行写操作（默认只读，更安全）
+    timeoutMs: 30000,
+  },
   exposePassthrough: false, // /v1/models 是否列出 "平台名:__passthrough__" 占位项（默认关：它不可调用，客户端误选会报错）
   groupCooldownOn429: true, // 连坐冷却：同账号分组内任意一个 Key 触发 429，整组一起冷却（账号级限流，避免逐个白试）
   // —— 半开探测（half-open）——
@@ -1145,6 +1153,30 @@ function reloadConfig() {
   if (CONFIG.halfOpen && CONFIG.halfOpen.enabled !== false) startProbeLoop();
   else if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
   if (CONFIG.proxyApiKey || n > 0) log('info', `鉴权已开启：分发 Key ${n} 个${CONFIG.proxyApiKey ? ' + 旧版单 Key' : ''}`, 'green');
+  initAgent();   // 数字员工实例（内部调用凭证随 accessKeys 变化，每次重载重建）
+}
+
+// ---------------------------------------------------------------- 数字员工（网页上的员工窗口）
+let AGENT = null;
+function initAgent() {
+  try {
+    const internalKey = Object.keys(CONFIG.accessKeys || {})[0] || CONFIG.proxyApiKey || '';
+    AGENT = createAgent({
+      getConfig: () => CONFIG,
+      log,
+      projectRoot: ROOT,
+      cliPath: path.join(ROOT, 'scripts', 'key-pool.js'),
+      poolBase: `http://127.0.0.1:${CONFIG.port}`,
+      ownBase: `http://127.0.0.1:${CONFIG.port}`,   // 员工默认查自己所在的这个池子
+      internalKey,
+    });
+    if (CONFIG.agent && CONFIG.agent.enabled !== false) {
+      log('info', `数字员工已就绪（大脑=${CONFIG.agent.model || 'auto'}，后端=${(CONFIG.agent.base) || `本部署 http://127.0.0.1:${CONFIG.port}`}，写操作=${CONFIG.agent.allowWrite ? '开' : '关'}）`, 'green');
+    }
+  } catch (e) {
+    log('warn', `数字员工初始化失败：${e.message}`, 'yellow');
+    AGENT = null;
+  }
 }
 
 function sleep(ms) {
@@ -1885,6 +1917,7 @@ function handleAdminPage(res) {
 // ---------------------------------------------------------------- 用户账号体系（网站地基）
 
 const crypto = require('node:crypto');
+const { createAgent } = require('./agent');
 const USERS_PATH = path.join(ROOT, 'users.json');
 const USERS = { byName: new Map(), byId: new Map() };        // name -> user, id -> user
 const SESSIONS = new Map();                                  // sid -> { userId, name, role, createdAt }
@@ -2578,6 +2611,44 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/api/usage' && req.method === 'GET') {
       if (!adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: CONFIG.adminToken ? '管理密码错误' : '操作台仅限本机访问（或先设置 adminToken 开启远程管理）', type: 'auth_error' } });
       return handleAdminUsage(res, url);
+    }
+
+    // ---------------------------------------------------------------- 数字员工（网页员工窗口）
+    if (p === '/api/agent/chat' && req.method === 'POST') {
+      if (!adminAllowed(req) && !resolveCollab(req)) return sendJson(res, 401, { needAuth: true, error: { message: '需要登录后使用', type: 'auth_error' } });
+      if (!AGENT) return sendJson(res, 503, { error: { message: '数字员工未就绪（检查 scripts/key-pool.js 是否存在）', type: 'agent_unavailable' } });
+      let ab = {};
+      try { ab = JSON.parse((await readBody(req, 1024 * 1024)).toString('utf8') || '{}'); } catch (_) {}
+      return await AGENT.handleChat(req, res, ab);
+    }
+    if (p === '/api/agent/config') {
+      if (!adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: '管理鉴权失败', type: 'auth_error' } });
+      if (req.method === 'GET') {
+        return sendJson(res, 200, {
+          config: CONFIG.agent || {},
+          baseEffective: AGENT ? AGENT.effectiveBase() : '',
+          tools: (AGENT ? AGENT.TOOLS : []).map((t) => ({ name: t.name, desc: t.desc, write: !!t.write })),
+        });
+      }
+      if (req.method === 'PUT') {
+        let ab = {};
+        try { ab = JSON.parse((await readBody(req, 256 * 1024)).toString('utf8') || '{}'); } catch (_) {}
+        let cur;
+        try { cur = readJson(CONFIG_PATH); } catch (e) { return sendJson(res, 500, { error: { message: '读配置失败：' + e.message, type: 'internal_error' } }); }
+        cur.agent = Object.assign({}, cur.agent || {}, {
+          enabled: ab.enabled !== false,
+          model: String(ab.model || 'auto').slice(0, 40),
+          // 后端地址：只允许 http(s) 形态，字符集收紧，防注入（CLI 侧还会再清洗一遍）
+          base: String(ab.base || '').trim().replace(/[^\w:./\-]/g, '').replace(/\/+$/, '').slice(0, 200),
+          maxTurns: Math.min(Math.max(Number(ab.maxTurns) || 6, 1), 12),
+          allowWrite: ab.allowWrite === true,
+        });
+        try {
+          fs.writeFileSync(CONFIG_PATH, JSON.stringify(cur, null, 2), 'utf8');
+          reloadConfig();
+        } catch (e) { return sendJson(res, 500, { error: { message: '保存失败：' + e.message, type: 'internal_error' } }); }
+        return sendJson(res, 200, { ok: true, config: CONFIG.agent });
+      }
     }
 
     // 协同管理员接口：collabTokens 登记的 token 专用（管理员 token 也可调用）
