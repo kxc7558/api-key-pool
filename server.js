@@ -606,6 +606,7 @@ class Pool {
         cooldownResetAfter: p.cooldownResetAfter != null ? p.cooldownResetAfter : 0,
         cooldownResetSpanMs: p.cooldownResetSpanMs != null ? p.cooldownResetSpanMs : 600000,
         probeTimeoutMs: p.probeTimeoutMs != null ? p.probeTimeoutMs : 0,   // 平台级探活超时覆盖
+        probePath: p.probePath || '',                                       // 平台级探活/模型列表路径覆盖
         // 连坐冷却可平台级覆盖：p.groupCooldownOn429 ?? 全局（默认 true）
         groupCooldownOn429: p.groupCooldownOn429 != null ? p.groupCooldownOn429 : (cfg.groupCooldownOn429 !== false),
         keys: [],
@@ -2205,6 +2206,61 @@ function readUsageLogs(days, filter, limit) {
   return { entries: matched, total };
 }
 
+/** GET /admin/api/provider-models?provider=xxx[&refresh=1]
+ *  用该平台的一个可用 Key 调上游 /models，返回模型 ID 列表（供前端下拉选择，防手填错模型名）。
+ *  结果缓存 1 小时；上游不提供 /models 或超时时返回 ok:false，前端降级为手填。 */
+const MODEL_LIST_CACHE = new Map();   // provider -> { models, fetchedAt, error }
+async function handleProviderModels(res, url) {
+  const name = String(url.searchParams.get('provider') || '');
+  const force = url.searchParams.get('refresh') === '1';
+  const p = POOL.providers.get(name);
+  if (!p) return sendJson(res, 404, { ok: false, error: `平台「${name}」不存在`, models: [] });
+  const cached = MODEL_LIST_CACHE.get(name);
+  const ttl = cached && cached.error ? 5 * 60000 : 3600000;   // 失败缓存 5 分钟(便于重试),成功缓存 1 小时
+  if (cached && !force && Date.now() - cached.fetchedAt < ttl) {
+    return sendJson(res, 200, {
+      ok: !cached.error, cached: true, models: cached.models,
+      error: cached.error || undefined, fetchedAt: cached.fetchedAt,
+    });
+  }
+  // 依次尝试最多 3 个 Key（首个可能无效/被限流，不能只试一个就放弃）
+  const candidates = (p.keys || []).filter((k) => !k.dead);
+  if (!candidates.length) candidates.push(...(p.keys || []));
+  if (!candidates.length) return sendJson(res, 200, { ok: false, error: '该平台没有配置 Key', models: [] });
+  const probePath = (p.probePath || (CONFIG.halfOpen && CONFIG.halfOpen.probePath) || 'models').replace(/^\/+/, '');
+  const target = joinUrl(p.baseUrl, probePath);
+  const timeoutMs = p.probeTimeoutMs || 15000;
+  let lastErr = '未知错误';
+  for (const key of candidates.slice(0, 3)) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const t0 = Date.now();
+    try {
+      const resp = await fetch(target, {
+        method: 'GET',
+        headers: { [p.authHeader || 'Authorization']: (p.authPrefix !== undefined ? p.authPrefix : 'Bearer ') + key.value, accept: 'application/json' },
+        signal: ac.signal,
+      });
+      clearTimeout(timer);
+      if (resp.status === 401 || resp.status === 403) { lastErr = `HTTP ${resp.status}（该 Key 无效）`; continue; }
+      if (!resp.ok) { lastErr = `上游返回 HTTP ${resp.status}`; continue; }
+      const data = await resp.json().catch(() => null);
+      const arr = (data && Array.isArray(data.data)) ? data.data : (Array.isArray(data) ? data : []);
+      const models = arr.map((m) => (typeof m === 'string' ? m : (m && (m.id || m.name)) || '')).filter(Boolean).sort();
+      if (!models.length) { lastErr = '上游未返回模型列表（该平台可能不提供 /models）'; continue; }
+      MODEL_LIST_CACHE.set(name, { models, fetchedAt: Date.now() });
+      log('info', `已拉取 ${name} 的模型列表：${models.length} 个（${Date.now() - t0}ms）`, 'gray');
+      return sendJson(res, 200, { ok: true, cached: false, models, ms: Date.now() - t0 });
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e && e.name === 'AbortError' ? `拉取超时（${timeoutMs}ms）` : (e.message || '请求失败');
+    }
+  }
+  MODEL_LIST_CACHE.set(name, { models: [], fetchedAt: Date.now(), error: lastErr });
+  log('warn', `拉取 ${name} 模型列表失败：${lastErr}`, 'yellow');
+  return sendJson(res, 200, { ok: false, error: lastErr, models: [] });
+}
+
 /** GET /admin/api/logs：筛选 + 倒序分页返回调用日志（已脱敏），不全量读内存 */
 function handleAdminLogs(res, url) {
   const q = url.searchParams;
@@ -2383,6 +2439,10 @@ const server = http.createServer(async (req, res) => {
       if (!adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: CONFIG.adminToken ? '管理密码错误' : '操作台仅限本机访问（或先设置 adminToken 开启远程管理）', type: 'auth_error' } });
       if (req.method === 'GET') return handleAdminGetConfig(res);
       if (req.method === 'PUT') return await handleAdminSaveConfig(req, res);
+    }
+    if (p === '/admin/api/provider-models' && req.method === 'GET') {
+      if (!adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: '管理鉴权失败', type: 'auth_error' } });
+      return await handleProviderModels(res, url);
     }
     if (p === '/admin/api/logs' && req.method === 'GET') {
       if (!adminAllowed(req)) return sendJson(res, 401, { needAuth: true, error: { message: CONFIG.adminToken ? '管理密码错误' : '操作台仅限本机访问（或先设置 adminToken 开启远程管理）', type: 'auth_error' } });

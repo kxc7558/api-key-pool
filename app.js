@@ -20,6 +20,7 @@ let usageFilter = { days: 7, caller: '' };
 let usageView = 'daily';
 let collabProviders = [];
 let myKeysCache = null;
+let providerModels = {};       // 平台 → { loading, ok, models[], error }（模型列表,供下拉选择）
 
 const $shell = document.getElementById('shell');
 const $toast = document.getElementById('toast');
@@ -471,7 +472,70 @@ function renderKeys(){
 function pageModels(){
   document.title = '模型 · API 代理池';
   renderShell('模型别名', '<div class="empty">加载中…</div>');
-  if (cfg) renderModels();
+  if (cfg){
+    renderModels();
+    loadAllProviderModels(false);   // 进页面预取各平台模型列表
+  }
+}
+/** 批量拉取需要的平台模型列表（有缓存则跳过），完成后统一重渲染 */
+async function loadAllProviderModels(force){
+  if (!cfg) return;
+  const names = [...new Set((cfg.providers||[]).map(p=>p.name).filter(Boolean))];
+  const todo = names.filter(n => {
+    if (force) return true;
+    const st = providerModels[n];
+    if (!st) return true;
+    if (st.loading) return false;
+    if (st.ok) return false;                                   // 已有成功结果,1 小时内不重拉
+    return Date.now() - (st.at||0) > 60000;                    // 失败后 1 分钟内不重试
+  });
+  if (!todo.length) return;
+  todo.forEach(n => { providerModels[n] = { loading:true, models:[] }; });
+  renderModels();
+  await Promise.all(todo.map(async n => {
+    try {
+      const r = await api('GET', '/admin/api/provider-models?provider=' + encodeURIComponent(n) + (force?'&refresh=1':''));
+      const d = r.data || {};
+      providerModels[n] = { loading:false, ok:!!d.ok, models:d.models||[], error:d.error||'', at:Date.now() };
+    } catch(e){
+      providerModels[n] = { loading:false, ok:false, models:[], error:e.message, at:Date.now() };
+    }
+  }));
+  if (currentPage === '#/console/models') renderModels();
+}
+/** 单个平台拉取模型列表(切换平台时用) */
+async function ensureProviderModels(name, force){
+  if (!name) return;
+  const st = providerModels[name];
+  if (!force){
+    if (st && (st.loading || st.ok)) return;
+    if (st && !st.ok && Date.now() - (st.at||0) < 60000) return;
+  }
+  providerModels[name] = { loading:true, models:[] };
+  if (currentPage === '#/console/models') renderModels();
+  try {
+    const r = await api('GET', '/admin/api/provider-models?provider=' + encodeURIComponent(name) + (force?'&refresh=1':''));
+    const d = r.data || {};
+    providerModels[name] = { loading:false, ok:!!d.ok, models:d.models||[], error:d.error||'', at:Date.now() };
+  } catch(e){
+    providerModels[name] = { loading:false, ok:false, models:[], error:e.message, at:Date.now() };
+  }
+  if (currentPage === '#/console/models') renderModels();
+}
+/** 生成某个平台模型选择控件：
+ *  列表可用 → datalist（可下拉选、也能打字过滤——OpenRouter 有 400+ 模型，纯 select 太长）
+ *  列表不可用 → 手填并说明原因 */
+function modelFieldHtml(alias, i, providerName, current){
+  const st = providerModels[providerName];
+  const path = `models.${alias}.${i}.model`;
+  if (!providerName) return `<input class="f mono" style="flex:1" data-set="${path}" value="${esc(current)}" placeholder="先选平台">`;
+  if (st && st.loading) return `<input class="f mono" style="flex:1" disabled value="加载模型列表…">`;
+  if (st && st.ok && st.models.length){
+    return `<input class="f mono" style="flex:1" list="dl-${esc(providerName)}" data-set="${path}" value="${esc(current)}"
+      placeholder="点选或输入关键字过滤（该平台 ${st.models.length} 个模型）">`;
+  }
+  const why = st && st.error ? `（列表不可用：${esc(st.error)}）` : '（未获取到列表）';
+  return `<input class="f mono" style="flex:1" data-set="${path}" value="${esc(current)}" placeholder="手动填模型 ID ${why}">`;
 }
 function renderModels(){
   const main = document.getElementById('main'); if (!main || !cfg) return;
@@ -485,8 +549,8 @@ function renderModels(){
       const opts = providers.map(p=>`<option value="${esc(p)}" ${p===pn?'selected':''}>${esc(p)}</option>`).join('')
         + (pn && !providers.includes(pn) ? `<option value="${esc(pn)}" selected>${esc(pn)}</option>` : '');
       return `<div class="sub-row">
-        <select class="f" style="flex:0 0 160px" data-set="models.${alias}.${i}.provider">${opts}</select>
-        <input class="f mono" data-set="models.${alias}.${i}.model" value="${esc(mn)}" placeholder="模型 ID，如 deepseek-v4-flash">
+        <select class="f" style="flex:0 0 150px" data-set="models.${alias}.${i}.provider" data-refresh-models="1">${opts}</select>
+        ${modelFieldHtml(alias, i, pn, mn)}
         <label style="flex:0 0 auto;display:flex;align-items:center;gap:4px;font-size:12px" title="兜底候选:主力全部限流/冷却时才会启用"><input type="checkbox" data-set="models.${alias}.${i}.fallback" ${t&&t.fallback?'checked':''}>兜底</label>
         <button class="btn danger sm" data-action="delModelCandidate" data-alias="${esc(alias)}" data-idx="${i}">删</button>
       </div>`;
@@ -499,10 +563,18 @@ function renderModels(){
         <button class="btn danger sm" data-action="delModel" data-alias="${esc(alias)}">删除别名</button>
       </div>${rows || '<div class="empty" style="padding:12px 0">暂无候选</div>'}</div>`;
   }).join('');
+  const anyLoading = Object.values(providerModels).some(v=>v && v.loading);
+  // 每个平台一份 datalist(共用,避免几百个 option 重复渲染)
+  const datalists = [...new Set(providers)].map(n=>{
+    const st = providerModels[n];
+    if (!st || !st.ok || !st.models.length) return '';
+    return `<datalist id="dl-${esc(n)}">${st.models.map(m=>`<option value="${esc(m)}"></option>`).join('')}</datalist>`;
+  }).join('');
   main.innerHTML = `<div class="toolbar">
       <button class="btn" data-action="addModel">+ 添加别名</button>
-      <span class="hint">别名只用英文数字,客户端要填它；客户端模型名填这里的别名（如 auto）</span>
-    </div>${list || '<div class="empty">还没有模型别名</div>'}`;
+      <button class="btn" data-action="refreshModels" ${anyLoading?'disabled':''}>${anyLoading?'拉取中…':'刷新平台模型列表'}</button>
+      <span class="hint">模型名从平台自动获取（每平台一份下拉列表，可输入过滤）；拉不到时才需手填</span>
+    </div>${list || '<div class="empty">还没有模型别名，点「+ 添加别名」开始</div>'}${datalists}`;
 }
 
 /* ================= 页面:分发密钥 ================= */
@@ -1087,6 +1159,11 @@ function validateConfig(){
     for (const t of cands){
       if (!t.provider || !pnames.has(t.provider)) problems.push(`别名「${alias}」引用了不存在的平台「${t.provider||'(空)'}」`);
       if (!t.model) problems.push(`别名「${alias}」有候选没填模型 ID`);
+      // 模型名对照平台真实列表（仅在已成功拉取到列表时检查）
+      const st = providerModels[t.provider];
+      if (st && st.ok && st.models.length && t.model && !st.models.includes(t.model)){
+        warnings.push(`别名「${alias}」的模型「${t.model}」不在平台「${t.provider}」的模型列表中——可能拼错，去「模型」页下拉重选`);
+      }
     }
     if (!cands.some(t=>!t.fallback)) warnings.push(`别名「${alias}」所有候选都是兜底——没有主力可走`);
   }
@@ -1142,6 +1219,10 @@ async function save(){
 /* ================= 事件委托(表单/按钮) ================= */
 document.addEventListener('input', e=>{
   const el = e.target;
+  // 平台选择变了 → 拉取该平台的模型列表(供模型名下拉)
+  if (el.dataset && el.dataset.refreshModels && el.value && cfg){
+    ensureProviderModels(el.value, false);
+  }
   if (el.dataset && el.dataset.set != null){
     let v = el.value;
     if (el.type === 'checkbox') v = el.checked;
@@ -1187,6 +1268,7 @@ document.addEventListener('click', e=>{
   else if (act === 'genAccess'){ accessRows.push({key:genKey(),name:'新用户',rpm:10,daily:300,enabled:true}); renderTokens(); markDirty(); }
   else if (act === 'genAccessBatch'){ for(let n=0;n<5;n++) accessRows.push({key:genKey(),name:'新用户'+(accessRows.length+1),rpm:10,daily:300,enabled:true}); renderTokens(); markDirty(); toast('已生成 5 个随机 Key，记得保存','ok'); }
   else if (act === 'delAccess'){ accessRows.splice(idx,1); renderTokens(); markDirty(); }
+  else if (act === 'refreshModels'){ toast('正在拉取各平台模型列表…'); loadAllProviderModels(true); }
 });
 
 /* ================= 启动 ================= */
