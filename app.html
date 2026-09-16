@@ -160,6 +160,11 @@
   .keyline:last-child{border-bottom:none}
   .keyline .k{font-family:var(--mono);font-size:13px;background:#f2f3f9;border-radius:7px;padding:5px 10px;-webkit-user-select:all;user-select:all;word-break:break-all}
   .tip{background:var(--blue-bg);border:1px solid #dbeafe;border-radius:var(--radius-sm);padding:12px 14px;font-size:13px;color:#1e40af;margin-bottom:16px}
+  /* 可搜索下拉（模型名选择） */
+  .combo-list{background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-lg);padding:4px;font-size:13px}
+  .combo-item{padding:7px 11px;cursor:pointer;border-radius:7px;font-family:var(--mono);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .combo-item:hover{background:var(--primary-bg);color:var(--primary)}
+  .combo-empty{padding:10px 11px;color:var(--faint);font-size:12.5px}
   @media(max-width:760px){#sidebar{flex-basis:60px;padding:18px 6px}.menu button span{display:none}.brand-name{display:none}main{padding:18px}.hide-sm{display:none}}
 </style>
 </head>

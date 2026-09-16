@@ -523,7 +523,7 @@ async function ensureProviderModels(name, force){
   if (currentPage === '#/console/models') renderModels();
 }
 /** 生成某个平台模型选择控件：
- *  列表可用 → datalist（可下拉选、也能打字过滤——OpenRouter 有 400+ 模型，纯 select 太长）
+ *  列表可用 → 可搜索下拉（点击即展开全部，输入即过滤——自己实现，不依赖 datalist 的浏览器差异）
  *  列表不可用 → 手填并说明原因 */
 function modelFieldHtml(alias, i, providerName, current){
   const st = providerModels[providerName];
@@ -531,12 +531,54 @@ function modelFieldHtml(alias, i, providerName, current){
   if (!providerName) return `<input class="f mono" style="flex:1" data-set="${path}" value="${esc(current)}" placeholder="先选平台">`;
   if (st && st.loading) return `<input class="f mono" style="flex:1" disabled value="加载模型列表…">`;
   if (st && st.ok && st.models.length){
-    return `<input class="f mono" style="flex:1" list="dl-${esc(providerName)}" data-set="${path}" value="${esc(current)}"
-      placeholder="点选或输入关键字过滤（该平台 ${st.models.length} 个模型）">`;
+    return `<input class="f mono" style="flex:1" data-set="${path}" data-provider="${esc(providerName)}"
+      value="${esc(current)}" autocomplete="off"
+      placeholder="点击选择，或输入关键字过滤（该平台 ${st.models.length} 个模型）">`;
   }
   const why = st && st.error ? `（列表不可用：${esc(st.error)}）` : '（未获取到列表）';
   return `<input class="f mono" style="flex:1" data-set="${path}" value="${esc(current)}" placeholder="手动填模型 ID ${why}">`;
 }
+
+/* ===== 可搜索下拉（自实现,不用 datalist——后者多数浏览器要输入才出建议） ===== */
+let openCombo = null;
+function closeCombo(){ if (openCombo){ openCombo.remove(); openCombo = null; } }
+function openComboFor(input, doFilter){
+  const prov = input.dataset.provider;
+  const st = providerModels[prov];
+  if (!st || !st.ok || !st.models.length) return;
+  closeCombo();
+  const rect = input.getBoundingClientRect();
+  const box = document.createElement('div');
+  box.className = 'combo-list';
+  box.style.cssText = `position:fixed;left:${Math.round(rect.left)}px;top:${Math.round(rect.bottom + 3)}px;`
+    + `width:${Math.round(Math.max(rect.width, 260))}px;max-height:300px;overflow:auto;z-index:400`;
+  const kw = doFilter ? String(input.value || '').trim().toLowerCase() : '';
+  const list = kw ? st.models.filter((m) => m.toLowerCase().includes(kw)) : st.models;
+  box.innerHTML = list.length
+    ? list.map((m) => `<div class="combo-item" data-v="${esc(m)}">${esc(m)}</div>`).join('')
+    : '<div class="combo-empty">没有匹配的模型</div>';
+  document.body.appendChild(box);
+  openCombo = box;
+  // 用 mousedown（比 click 早，避免 input 失焦导致列表先被关掉）
+  box.addEventListener('mousedown', (e) => {
+    const it = e.target.closest('.combo-item'); if (!it) return;
+    e.preventDefault();
+    input.value = it.dataset.v;
+    input.dispatchEvent(new Event('input', { bubbles: true }));   // 触发原有的 data-set 保存逻辑
+    closeCombo();
+  });
+}
+document.addEventListener('click', (e) => {
+  const inp = e.target.closest('input[data-provider]');
+  if (inp){ openComboFor(inp, false); return; }   // 点击输入框 → 展开全部
+  if (!e.target.closest('.combo-list')) closeCombo();
+});
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.dataset && el.dataset.provider){ openComboFor(el, true); }   // 输入 → 过滤
+});
+window.addEventListener('resize', closeCombo);
+window.addEventListener('scroll', closeCombo, true);
 function renderModels(){
   const main = document.getElementById('main'); if (!main || !cfg) return;
   const entries = Object.keys(cfg.models||{}).filter(a=>!a.startsWith('_'));
@@ -566,17 +608,11 @@ function renderModels(){
       </div>${rows || '<div class="empty" style="padding:12px 0">暂无候选</div>'}</div>`;
   }).join('');
   const anyLoading = Object.values(providerModels).some(v=>v && v.loading);
-  // 每个平台一份 datalist(共用,避免几百个 option 重复渲染)
-  const datalists = [...new Set(providers)].map(n=>{
-    const st = providerModels[n];
-    if (!st || !st.ok || !st.models.length) return '';
-    return `<datalist id="dl-${esc(n)}">${st.models.map(m=>`<option value="${esc(m)}"></option>`).join('')}</datalist>`;
-  }).join('');
   main.innerHTML = `<div class="toolbar">
       <button class="btn" data-action="addModel">+ 添加别名</button>
       <button class="btn" data-action="refreshModels" ${anyLoading?'disabled':''}>${anyLoading?'拉取中…':'刷新平台模型列表'}</button>
-      <span class="hint">模型名从平台自动获取（每平台一份下拉列表，可输入过滤）；拉不到时才需手填</span>
-    </div>${list || '<div class="empty">还没有模型别名，点「+ 添加别名」开始</div>'}${datalists}`;
+      <span class="hint">模型名从平台自动获取：点输入框展开列表，输入关键字可过滤；拉不到列表时才需手填</span>
+    </div>${list || '<div class="empty">还没有模型别名，点「+ 添加别名」开始</div>'}`;
 }
 
 /* ================= 页面:分发密钥 ================= */

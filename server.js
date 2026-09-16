@@ -1995,6 +1995,10 @@ function handleAuthApi(req, res, p) {
           const { salt, hash } = hashPassword(password);
           user.salt = salt; user.hash = hash; saveUsers();
         }
+        // 「请修改密码」只在仍用预设默认密码时提示：用 token 登录 = 已自管凭证,清掉标记
+        if (user.mustChangePassword && password !== DEFAULT_ADMIN_PASSWORD) {
+          user.mustChangePassword = false; saveUsers();
+        }
         authRateReset(rlKey);
         const sid = crypto.randomBytes(16).toString('hex');
         SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
@@ -2008,6 +2012,10 @@ function handleAuthApi(req, res, p) {
         return sendJson(res, 401, { error: { message: '用户名或密码错误', type: 'auth_error' } });
       }
       authRateReset(rlKey);
+      // 密码已不是预设默认值 → 不再提示修改
+      if (user.mustChangePassword && password !== DEFAULT_ADMIN_PASSWORD) {
+        user.mustChangePassword = false; saveUsers();
+      }
       const sid = crypto.randomBytes(16).toString('hex');
       SESSIONS.set(sid, { userId: user.id, name: user.name, role: user.role, createdAt: Date.now() });
       res.setHeader('set-cookie', `${COOKIE_NAME}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
