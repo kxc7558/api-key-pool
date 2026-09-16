@@ -238,11 +238,11 @@ function viewAuth(route){
       <div style="text-align:center;margin-bottom:20px">
         <div class="brand-logo" style="width:48px;height:48px;margin:0 auto 10px;border-radius:14px"><svg class="ic"><use href="#i-zap"/></svg></div>
         <div style="font-size:20px;font-weight:600">${isLogin?'登录':'注册账号'}</div>
-        <div style="font-size:13px;color:var(--muted);margin-top:6px;line-height:1.6">${isLogin?'普通用户填密码<br>管理员 / 协同管理员在密码栏填自己的 Token':'注册后可查看个人中心;调用 Key 请联系管理员开通'}</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:6px;line-height:1.6">${isLogin?'普通用户：用户名 + 密码<br>管理员 / 协同管理员：<b>密码栏填 Token</b>（用户名随意填）':'注册后可查看个人中心；调用 Key 请联系管理员开通'}</div>
       </div>
       <div class="card" style="padding:24px">
         <div id="auth-err" style="display:none;color:var(--red);font-size:13px;margin-bottom:10px"></div>
-        ${isLogin?'':`<div class="field"><label>用户名</label><input class="f" id="auth-name" maxlength="24" autocomplete="username" placeholder="2~24 个字符"></div>`}
+        <div class="field"><label>用户名</label><input class="f" id="auth-name" maxlength="24" autocomplete="username" placeholder="${isLogin?'普通用户填用户名；管理员填 admin 或随意':'2~24 个字符'}"></div>
         <div class="field"><label>密码${isLogin?'（管理员填 Token）':''}</label><input class="f" type="password" id="auth-pass" autocomplete="current-password" placeholder="${isLogin?'':'至少 6 位'}"></div>
         ${isLogin?'':`<div class="field"><label>确认密码</label><input class="f" type="password" id="auth-pass2"></div>`}
         <div class="field"><label>验证码（点击图片刷新）</label>
@@ -273,9 +273,12 @@ async function doAuth(isLogin){
   const name = nameEl ? nameEl.value.trim() : '';
   const password = document.getElementById('auth-pass').value;
   const captchaText = document.getElementById('auth-cap').value.trim();
-  if (!password || !captchaText) return showErr('请填写完整');
-  if (!isLogin){
+  if (isLogin){
+    if (!name) return showErr('请填写用户名（管理员 / 协同管理员可填 admin 或随意）');
+    if (!password || !captchaText) return showErr('请填写完整');
+  } else {
     if (!name) return showErr('请填写用户名');
+    if (!password || !captchaText) return showErr('请填写完整');
     if (password.length < 6) return showErr('密码至少 6 位');
     if (password !== document.getElementById('auth-pass2').value) return showErr('两次密码不一致');
   }
