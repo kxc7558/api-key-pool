@@ -27,8 +27,10 @@ for (const a of argv.slice(1)) {
 }
 
 const BASE = (flags.base || process.env.POOL_BASE || 'http://124.221.231.32:8787').replace(/\/+$/, '');
+// 默认取「本 CLI 所属项目」的 config.json —— 本机(Windows)与云端(Linux)都成立，
+// 不能写死绝对路径，否则换台机器就取不到 adminToken（云端踩过）
 const CFG_PATH = flags.config || process.env.POOL_CONFIG
-  || 'C:\\Users\\32492\\WorkBuddy\\2026-09-01-11-19-50\\api-key-pool\\config.json';
+  || path.join(__dirname, '..', 'config.json');
 const BACKUP_DIR = path.join(os.homedir(), '.api-key-pool-backups');
 
 /* ---------- 输出 ---------- */
