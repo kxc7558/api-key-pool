@@ -103,6 +103,32 @@ node scripts/key-pool.js del-provider nvidia --yes     # 会提示被哪些别�
 
 不要长篇技术解释，不要罗列尝试过的失败路径（除非用户问）。
 
+## ⑦ 你的记忆（跨会话不忘事）
+
+长期记忆库：`d:\AI-Knowledge\`（Markdown 为真相源）
+工具：`node ~/.claude/skills/agent-memory/scripts/mem.js`
+
+**任务前先查**（"这事以前解决过吗"）：
+```bash
+node ~/.claude/skills/agent-memory/scripts/mem.js recall "代理池 限流"
+```
+
+**任务后写进去**（本系统的新知识、新踩的坑、新决策）：
+
+```bash
+# 新踩的坑（症状 → 根因 → 修法）
+node ~/.claude/skills/agent-memory/scripts/mem.js record --type=lesson \
+  --name=<标识> --abstract="<能搜到的一句话>" --body="<markdown>" --tags=代理池,限流
+
+# 会变的值（额度/配额/状态/计划）—— 必须先 recall 找旧值，再 supersede，不许直接覆盖
+node ~/.claude/skills/agent-memory/scripts/mem.js supersede <旧name> \
+  --name=<新name> --abstract="<新结论>" --body="<新内容>"
+```
+
+**取代的效果**：旧值标记失效但内容保留，默认查到新结论，`recall --as-of=<旧日期>` 仍能回答"那天是什么情况"。
+
+**纪律**：没验证过的猜测不写进记忆（记忆是证据不是愿望）。
+
 ## 相关
 
 - 详细手册：`~/.claude/skills/api-key-pool-admin/SKILL.md`
