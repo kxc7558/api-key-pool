@@ -39,7 +39,7 @@ http.createServer((req, res) => {
   // ---- 探活（GET models）：BAD1 401 / ALWAYS429 429 / REVIVE1 200（模拟风控解除） / 其余 200 ----
   if (req.method === 'GET' && (url.includes('/models'))) {
     if (auth === 'BAD1') return send(401, { error: { message: 'invalid api key', code: 'auth_error' } });
-    if (auth === 'ALWAYS429') return send(429, { error: { message: 'rate limited', code: 'rate_limit_error' } }, { 'retry-after': '2' });
+    if (auth === 'ALWAYS429' || String(auth).startsWith('ALWAYS429_')) return send(429, { error: { message: 'rate limited', code: 'rate_limit_error' } }, { 'retry-after': '2' });
     return send(200, { object: 'list', data: [{ id: 'mock-model', object: 'model', owned_by: 'mock' }] });
   }
 
@@ -65,7 +65,7 @@ http.createServer((req, res) => {
     if (auth === 'RATE2B' && n > 2) {
       return send(429, { error: { message: 'rate limited', code: 'rate_limit_error' } }, { 'retry-after': '1' });
     }
-    if (auth === 'ALWAYS429') {
+    if (auth === 'ALWAYS429' || String(auth).startsWith('ALWAYS429_')) {
       return send(429, { error: { message: 'rate limited', code: 'rate_limit_error' } });
     }
     if (auth === 'SLOW1') await new Promise((r) => setTimeout(r, 3000));

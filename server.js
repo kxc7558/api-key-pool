@@ -469,7 +469,8 @@ class ApiKey {
   succeed(latencyMs) {
     this.inflight = Math.max(0, this.inflight - 1);
     this.failStreak = 0;
-    if (this.group) this.group.failStreak = 0;
+    this.failSince = 0;                                  // 一次成功即清零「连续失败起点」
+    if (this.group) { this.group.failStreak = 0; this.group.failSince = 0; }
     this.pendingVerify = false; // 真实请求成功 = 最好的验证
     this.stats.ok++;
     this.stats.lastLatencyMs = latencyMs;
@@ -491,16 +492,23 @@ class ApiKey {
     // 退避单元：连坐模式下用「组」累计连续失败，单 Key 模式用自身
     const unit = useGroup ? this.group : this;
     unit.failStreak = (unit.failStreak || 0) + 1;
+    // 记录本轮连续失败的起点（成功即清零）——用于区分「瞬时抖动」与「真的额度用尽」
+    if (!unit.failSince) unit.failSince = now;
     // 冷却时长（借鉴 llm-keypool：429 优先听上游 Retry-After；
-    //   连续多次 429 且平台配了额度重置周期 → 直接冷却到重置周期，避免「额度用尽后指数退避到 10min 封顶、回池又立刻撞墙」；
-    //   普通瞬时限流才走指数退避）
+    //   只有「连续多次 429 **且持续够久**」才判定额度用尽、冷却对齐重置周期——
+    //   单纯连打几次 429 往往是瞬时 TPM 限流，几秒就恢复，不该冻结整组几小时；
+    //   普通瞬时限流一律走指数退避）
     const resetMs = this.provider.cooldownResetMs || 0;
     const resetAfter = this.provider.cooldownResetAfter || 0;
+    const spanMs = this.provider.cooldownResetSpanMs != null ? this.provider.cooldownResetSpanMs : 600000; // 默认要求持续 10 分钟
+    const sustainedMs = now - unit.failSince;
+    const quotaExhausted = resetMs > 0 && resetAfter > 0 && unit.failStreak >= resetAfter && sustainedMs >= spanMs;
     const base = retryAfterMs && retryAfterMs > 0
       ? Math.min(retryAfterMs, this.provider.maxCooldownMs) // S4：Retry-After 夹紧，防异常大值锁整组一天
-      : (resetMs > 0 && resetAfter > 0 && unit.failStreak >= resetAfter
+      : (quotaExhausted
         ? resetMs
         : Math.min(this.provider.cooldownMs * Math.pow(2, unit.failStreak - 1), this.provider.maxCooldownMs));
+    if (quotaExhausted) log('warn', `判定额度用尽（连续 ${unit.failStreak} 次 429，持续 ${Math.round(sustainedMs/60000)} 分钟）→ 冷却对齐重置周期`, 'yellow');
     const until = now + base;
     if (useGroup) {
       this.group.cooldownUntil = until; // 整组一起冷却
@@ -592,9 +600,12 @@ class Pool {
         cooldownMs: p.cooldownMs != null ? p.cooldownMs : cfg.cooldownMs,
         maxCooldownMs: p.maxCooldownMs != null ? p.maxCooldownMs : cfg.maxCooldownMs,
         serverErrorCooldownMs: p.serverErrorCooldownMs != null ? p.serverErrorCooldownMs : cfg.serverErrorCooldownMs,
-        // 额度重置周期（借鉴 llm-keypool 的冷却回退策略）：连续 cooldownResetAfter 次 429 后，冷却直接对齐该周期
+        // 额度重置周期（借鉴 llm-keypool 的冷却回退策略）：连续 cooldownResetAfter 次 429
+        // 且持续 cooldownResetSpanMs 以上，才判定额度用尽并对齐重置周期冷却
         cooldownResetMs: p.cooldownResetMs != null ? p.cooldownResetMs : 0,
         cooldownResetAfter: p.cooldownResetAfter != null ? p.cooldownResetAfter : 0,
+        cooldownResetSpanMs: p.cooldownResetSpanMs != null ? p.cooldownResetSpanMs : 600000,
+        probeTimeoutMs: p.probeTimeoutMs != null ? p.probeTimeoutMs : 0,   // 平台级探活超时覆盖
         // 连坐冷却可平台级覆盖：p.groupCooldownOn429 ?? 全局（默认 true）
         groupCooldownOn429: p.groupCooldownOn429 != null ? p.groupCooldownOn429 : (cfg.groupCooldownOn429 !== false),
         keys: [],
@@ -838,12 +849,24 @@ async function probeKey(key) {
     } else {
       key.softCooldown(h.failBackoffMs || 30000);
       key.probeFailStreak++;
-      log('warn', `探活未通过 ${key.label}：HTTP ${resp.status}，继续冷却`, 'yellow');
+      if (key.probeFailStreak >= 3) {
+        // 探活连续失败（探活端点慢/不通），不代表 Key 不能用 → 放回池交真实请求验证
+        key.cooldownUntil = 0; key.pendingVerify = false;
+        log('warn', `探活连续失败 ${key.probeFailStreak} 次（HTTP ${resp.status}），跳过探活直接回池 ${key.label}`, 'yellow');
+      } else {
+        log('warn', `探活未通过 ${key.label}：HTTP ${resp.status}，继续冷却`, 'yellow');
+      }
     }
   } catch (e) {
     key.softCooldown(h.failBackoffMs || 30000);
     key.probeFailStreak++;
-    log('warn', `探活失败 ${key.label}：${e.message}，继续冷却`, 'yellow');
+    if (key.probeFailStreak >= 3) {
+      // 探活超时/网络错误：探活本身不可靠时不应永久扣住 Key，放回池由真实请求判定
+      key.cooldownUntil = 0; key.pendingVerify = false;
+      log('warn', `探活连续失败 ${key.probeFailStreak} 次（${e.message}），跳过探活直接回池 ${key.label}`, 'yellow');
+    } else {
+      log('warn', `探活失败 ${key.label}：${e.message}，继续冷却`, 'yellow');
+    }
   } finally {
     key.lastProbeAt = Date.now();
     key.probing = false;

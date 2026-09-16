@@ -1,0 +1,48 @@
+{
+ "host": "127.0.0.1",
+ "port": 8896,
+ "maxAttempts": 2,
+ "waitForSlotMs": 300,
+ "cooldownMs": 100,
+ "maxCooldownMs": 1000,
+ "serverErrorCooldownMs": 100,
+ "requestTimeoutMs": 8000,
+ "strategy": "round-robin",
+ "logLevel": "warn",
+ "groupCooldownOn429": true,
+ "halfOpen": {
+  "enabled": false
+ },
+ "defaults": {
+  "rpmPerKey": 0,
+  "maxConcurrencyPerKey": 0
+ },
+ "providers": [
+  {
+   "name": "burstP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "rpmPerKey": 0,
+   "rpmPerAccount": 0,
+   "maxConcurrencyPerKey": 0,
+   "keys": [
+    "ALWAYS429_1@grp",
+    "ALWAYS429_2@grp",
+    "ALWAYS429_3@grp"
+   ],
+   "cooldownResetMs": 18000000,
+   "cooldownResetAfter": 5,
+   "cooldownResetSpanMs": 900000
+  }
+ ],
+ "models": {
+  "t": [
+   {
+    "provider": "burstP",
+    "model": "mock-model"
+   }
+  ]
+ },
+ "breaker": {
+  "enabled": false
+ }
+}
