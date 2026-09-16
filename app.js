@@ -1141,7 +1141,7 @@ function pageAgent(){
       <span class="agent-chip" data-q="用量趋势怎么样">用量趋势怎么样</span>
     </div>`;
   } else {
-    for (const h of agentHistory) msgs.insertAdjacentHTML('beforeend', agentBubble(h.role, esc(h.content)));
+    for (const h of agentHistory) msgs.insertAdjacentHTML('beforeend', agentBubble(h.role, h.role === 'user' ? esc(h.content) : agentMd(h.content)));
     msgs.scrollTop = msgs.scrollHeight;
   }
   msgs.addEventListener('click', (e) => {
@@ -1164,6 +1164,20 @@ function pageAgent(){
 
 function agentBubble(role, html){
   return `<div class="agent-msg ${role === 'user' ? 'user' : 'bot'}">${html}</div>`;
+}
+/** 极简 markdown：先转义再套格式（代码块 / 行内码 / 粗体 / 列表），不引入第三方库 */
+function agentMd(t){
+  const blocks = [];
+  let h = esc(t).replace(/```[a-z]*\n?([\s\S]*?)```/g, (m, c) => {
+    blocks.push(c.replace(/\s+$/, ''));
+    return ` B${blocks.length - 1} `;
+  });
+  h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>')
+       .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+       .replace(/^[-*] (.+)$/gm, '• $1')
+       .replace(/\n{3,}/g, '\n\n')
+       .replace(/\n/g, '<br>');
+  return h.replace(/ B(\d+) /g, (m, i) => `<pre class="agent-code">${blocks[+i]}</pre>`);
 }
 function agentPush(role, html){
   const box = document.getElementById('agent-msgs');
@@ -1194,7 +1208,7 @@ async function agentSend(){
   const scroll = () => { const b = document.getElementById('agent-msgs'); if (b) b.scrollTop = b.scrollHeight; };
   const setText = (t) => {
     if (!bodyEl) return;
-    bodyEl.innerHTML = esc(t).replace(/\n/g, '<br>');
+    bodyEl.innerHTML = agentMd(t);
     scroll();
   };
   /* 过程可见：每个工具调用占一块，显示**真正跑的命令**，输出可展开看原文 */
@@ -1316,11 +1330,16 @@ function agentOpenSettings(){
     if (isCustom) baseCustom.focus();
   };
   mask.querySelector('#ag-save').onclick = async () => {
+    const wantWrite = mask.querySelector('#ag-write').checked;
+    // 「允许员工写操作」是这个面板里唯一的高风险开关：必须人明确确认，
+    // 不能让它靠"顺手点保存"被静默打开
+    if (wantWrite && !c.allowWrite
+        && !confirm('开启后，员工就能改动你的代理池配置（加别名、切调度策略、备份）。\n\n确定开启写操作？')) return;
     const body = {
       model: mask.querySelector('#ag-model').value.trim() || 'auto',
       base: (baseSel.value === '__custom__' ? baseCustom.value : baseSel.value).trim(),
       maxTurns: Number(mask.querySelector('#ag-turns').value) || 6,
-      allowWrite: mask.querySelector('#ag-write').checked,
+      allowWrite: wantWrite,
       enabled: true,
     };
     const r = await api('PUT', '/api/agent/config', body);
