@@ -1,0 +1,50 @@
+{
+ "host": "127.0.0.1",
+ "maxAttempts": 3,
+ "waitForSlotMs": 1000,
+ "cooldownMs": 1000,
+ "maxCooldownMs": 5000,
+ "serverErrorCooldownMs": 500,
+ "requestTimeoutMs": 12000,
+ "logLevel": "warn",
+ "groupCooldownOn429": false,
+ "halfOpen": {
+  "enabled": false
+ },
+ "defaults": {
+  "rpmPerKey": 0,
+  "maxConcurrencyPerKey": 0
+ },
+ "port": 8898,
+ "strategy": "cost-first",
+ "providers": [
+  {
+   "name": "expensiveP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "keys": [
+    "MOCK-E1"
+   ]
+  },
+  {
+   "name": "cheapP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "keys": [
+    "MOCK-C1"
+   ]
+  }
+ ],
+ "models": {
+  "t": [
+   {
+    "provider": "expensiveP",
+    "model": "mock-model",
+    "cost": 5
+   },
+   {
+    "provider": "cheapP",
+    "model": "mock-model",
+    "cost": 1
+   }
+  ]
+ }
+}

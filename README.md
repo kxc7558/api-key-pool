@@ -130,6 +130,36 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ---
 
+## 四种调度策略（`strategy`）
+
+**先澄清一个常见误解**：一个别名挂多个候选，**不会**让额度消耗变大——一次客户端请求永远只产生一次上游调用，走哪个候选都是消耗一次。多挂候选的意义是**能动用多个额度池**（不同平台/不同模型的免费额度是分开算的）。
+
+策略决定的是「有多个可用候选时先挑谁」：
+
+| 策略 | 怎么挑 | 适合 |
+|---|---|---|
+| `round-robin` | 轮流均分 | 候选速度/质量相近，想摊薄单个额度池的压力 |
+| `least-used` | 累计用得最少的优先 | 想让各候选用量均衡 |
+| `latency-first` | **按实测延迟排序，慢的靠后** | **要快**——把慢候选自动降级（参照 litellm 的 `lowest_latency`）|
+| `cost-first` | **按候选标注的 `cost` 排序，越小越先用** | **要省**——优先消耗额度大/便宜的（参照 litellm 的 `lowest_cost`）|
+
+**要快**就在操作台「设置」里把 strategy 切成 `latency-first`：池子会自动按各候选的实测耗时排序，某个候选一慢下来就自动被排到后面（慢候选只会被偶尔试探一次以更新基线）。
+
+**要省**就用 `cost-first`，并在「模型」页给每个候选标一个成本值：
+
+```json
+"pro": [
+  { "provider": "sensenova",  "model": "sensenova-6.8-flash-lite", "cost": 0.3 },  // 额度 1500 次/5h → 更便宜
+  { "provider": "sensenova",  "model": "deepseek-v4-pro",         "cost": 1   },
+  { "provider": "openrouter","model": "xxx:free",                 "cost": 10, "fallback": true }  // 每日 50 次 → 很贵
+]
+```
+
+> 没标 `cost` 的候选按 `1` 处理。两个策略都**尊重 `fallback`**：兜底候选仍然只在主力全部不可用时才启用。
+> 另外注意：慢候选别当普通候选挂（会拉低整体速度），要挂就标 `fallback: true`——`latency-first` 能自动规避，但显式标注更明确。
+
+---
+
 ## ⚠️ 同一账号的多个 Key 不叠加额度
 
 这是最容易踩的坑：**英伟达的 40 RPM 是账号级限制，不是 Key 级**。同一个账号开 8 个 Key，总额度还是 40 RPM；商汤的「每 5 小时 1500 次」同理，按账号算。
@@ -171,7 +201,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `port` | `8787` | 端口。被占用就换一个 |
 | `proxyApiKey` | 空 | 旧版单 Key 鉴权：客户端必须带 `Authorization: Bearer <这个值>`。新项目建议用下面的 `accessKeys` |
 | `accessKeys` | `{}` | 中转站分发 Key：`{ "分发的Key": "用户名" }` 或 `{ "分发的Key": { "name": "用户名", "rpm": 10, "daily": 300 } }`。`rpm`=每分钟上限、`daily`=每天上限，0/缺省=不限。每日配额按**北京时间**（UTC+8）零点重置；`GET /v1/models` 只做鉴权、**不消耗**用户的 rpm/daily 次数 |
-| `strategy` | `round-robin` | `round-robin` 轮流；`least-used` 优先挑用得最少的 |
+| `strategy` | `round-robin` | 候选调度策略，见下方「四种调度策略」 |
 | `maxAttempts` | `8` | 单次请求最多尝试多少个「模型 + Key」组合。Key 多、容忍度高可以调大 |
 | `waitForSlotMs` | `20000` | 全部 Key 都忙时，最长排队等待多久再报 503 |
 | `cooldownMs` | `60000` | 触发 429 后的基础冷却时长（会指数退避） |

@@ -551,6 +551,8 @@ function renderModels(){
       return `<div class="sub-row">
         <select class="f" style="flex:0 0 150px" data-set="models.${alias}.${i}.provider" data-refresh-models="1">${opts}</select>
         ${modelFieldHtml(alias, i, pn, mn)}
+        <input class="f" type="number" step="0.1" min="0" style="flex:0 0 88px" data-set="models.${alias}.${i}.cost"
+          value="${t && t.cost != null ? t.cost : ''}" placeholder="成本" title="省钱策略用：数字越小越优先使用（留空=1）">
         <label style="flex:0 0 auto;display:flex;align-items:center;gap:4px;font-size:12px" title="兜底候选:主力全部限流/冷却时才会启用"><input type="checkbox" data-set="models.${alias}.${i}.fallback" ${t&&t.fallback?'checked':''}>兜底</label>
         <button class="btn danger sm" data-action="delModelCandidate" data-alias="${esc(alias)}" data-idx="${i}">删</button>
       </div>`;
@@ -866,9 +868,12 @@ function renderSettings(){
     <div class="grid3">
       <div class="field"><label>调度策略 strategy</label>
         <select class="f" data-set="strategy">
-          <option value="round-robin" ${cfg.strategy==='round-robin'?'selected':''}>round-robin（轮流）</option>
+          <option value="round-robin" ${cfg.strategy==='round-robin'?'selected':''}>round-robin（轮流均分）</option>
           <option value="least-used" ${cfg.strategy==='least-used'?'selected':''}>least-used（最闲优先）</option>
-        </select></div>
+          <option value="latency-first" ${cfg.strategy==='latency-first'?'selected':''}>latency-first（快优先）</option>
+          <option value="cost-first" ${cfg.strategy==='cost-first'?'selected':''}>cost-first（省钱优先）</option>
+        </select>
+        <div class="hint">快优先=按实测延迟排（谁快用谁）；省钱优先=按候选标注的 cost 排（越小越先用，未标注按 1）</div></div>
       <div class="field"><label>日志级别 logLevel</label>
         <select class="f" data-set="logLevel">
           ${['debug','info','warn','error','silent'].map(x=>`<option value="${x}" ${cfg.logLevel===x?'selected':''}>${x}</option>`).join('')}

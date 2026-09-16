@@ -698,7 +698,7 @@ class Pool {
           if (p) out.push({ provider: p, model: t.slice(idx + 1) });
         } else if (t && t.provider) {
           const p = this.providers.get(t.provider);
-          if (p) out.push({ provider: p, model: t.model || model, fallback: !!t.fallback });
+          if (p) out.push({ provider: p, model: t.model || model, fallback: !!t.fallback, cost: t.cost });
         }
       }
       if (out.length) return out;
@@ -724,13 +724,36 @@ class Pool {
     return this.pickFrom(targets, strategy);
   }
 
-  /** 在给定候选组内挑选，不含兜底分流逻辑 */
+  /** 候选排序分数（越小越优先）——供 cost-first / latency-first 策略使用 */
+  targetScore(target, strategy) {
+    const p = target.provider;
+    if (strategy === 'cost-first') {
+      // 候选可标 cost（数字，越小越便宜）；没标 → 中性值 1
+      const c = Number(target.cost);
+      return Number.isFinite(c) && c >= 0 ? c : 1;
+    }
+    // latency-first：该平台已有实测延迟的 Key 取均值；没数据 → 中性默认值（避免新候选被当成最快）
+    let sum = 0, cnt = 0;
+    for (const k of p.keys) {
+      const lat = k.stats && k.stats.lastLatencyMs;
+      if (lat > 0) { sum += lat; cnt++; }
+    }
+    return cnt ? sum / cnt : 2000;
+  }
+
+  /** 在给定候选组内挑选，不含兜底分流逻辑。
+   *  strategy: round-robin（默认，轮流）| least-used（最闲优先）
+   *           | cost-first（省钱：优先便宜候选）| latency-first（快：优先实测延迟低的候选） */
   pickFrom(targets, strategy) {
     const now = Date.now();
-    const n = targets.length;
+    const ranked = (strategy === 'cost-first' || strategy === 'latency-first');
+    const list = ranked
+      ? targets.slice().sort((a, b) => this.targetScore(a, strategy) - this.targetScore(b, strategy))
+      : targets;
+    const n = list.length;
     for (let i = 0; i < n; i++) {
-      const ti = (this.targetCursor + i) % n;
-      const target = targets[ti];
+      const ti = ranked ? i : (this.targetCursor + i) % n;
+      const target = list[ti];
       const p = target.provider;
       const keys = p.keys;
       const m = keys.length;
@@ -758,7 +781,7 @@ class Pool {
 
       const key = keys[startAt];
       p.cursor = (startAt + 1) % m;
-      this.targetCursor = (ti + 1) % n;
+      if (!ranked) this.targetCursor = (ti + 1) % n;
       return { target, key };
     }
     return null;

@@ -1,0 +1,48 @@
+{
+ "host": "127.0.0.1",
+ "maxAttempts": 3,
+ "waitForSlotMs": 1000,
+ "cooldownMs": 1000,
+ "maxCooldownMs": 5000,
+ "serverErrorCooldownMs": 500,
+ "requestTimeoutMs": 12000,
+ "logLevel": "warn",
+ "groupCooldownOn429": false,
+ "halfOpen": {
+  "enabled": false
+ },
+ "defaults": {
+  "rpmPerKey": 0,
+  "maxConcurrencyPerKey": 0
+ },
+ "port": 8889,
+ "strategy": "latency-first",
+ "providers": [
+  {
+   "name": "slowP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "keys": [
+    "SLOW1"
+   ]
+  },
+  {
+   "name": "fastP",
+   "baseUrl": "http://127.0.0.1:8899/v1",
+   "keys": [
+    "MOCK-F1"
+   ]
+  }
+ ],
+ "models": {
+  "t": [
+   {
+    "provider": "slowP",
+    "model": "mock-model"
+   },
+   {
+    "provider": "fastP",
+    "model": "mock-model"
+   }
+  ]
+ }
+}
