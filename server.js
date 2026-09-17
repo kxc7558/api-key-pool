@@ -1367,13 +1367,30 @@ async function attempt(slot, bodyObj, isStream, clientHeaders, abortSignal) {
   }
 }
 
-function normalizeSseLine(line) {
+/**
+ * 单个 SSE 行归一化。
+ *
+ * ① 总是做：摘掉**空字符串**的 reasoning_content。
+ *    有的上游（ModelScope 的 deepseek-ai/DeepSeek-V4.1-Flash 等）在**每个正文分片**里
+ *    都附一个 reasoning_content:""——字段存在但值为空。下游客户端只看"有没有这个字段"
+ *    来判断"这片是思考内容"，于是每片都开一个空思考块 + 一个文字块：
+ *    一条回复被切成几十个碎片，UI 里狂跳 Thinking（cc-switch 转 Anthropic 协议时最容易中招）。
+ *    空值不携带任何信息，删掉它不可能丢内容。
+ * ② 可选做（fixFinishReason）：把非标准的 finish_reason="" 归一为 null。
+ */
+function normalizeSseLine(line, fixFinishReason) {
   if (!line.startsWith('data: ') || line === 'data: [DONE]') return line;
   try {
     const event = JSON.parse(line.slice(6));
     let changed = false;
     for (const choice of event.choices || []) {
-      if (choice && choice.finish_reason === '') {
+      if (!choice) continue;
+      const d = choice.delta;
+      if (d && Object.prototype.hasOwnProperty.call(d, 'reasoning_content') && !d.reasoning_content) {
+        delete d.reasoning_content;
+        changed = true;
+      }
+      if (fixFinishReason && choice.finish_reason === '') {
         choice.finish_reason = null;
         changed = true;
       }
@@ -1385,10 +1402,11 @@ function normalizeSseLine(line) {
 }
 
 /**
- * 将非标准 SSE 的 finish_reason="" 归一为 OpenAI 标准 null。
- * 逐行缓冲以处理 TCP/Fetch chunk 恰好切在 SSE 行中间的情况；非 data 行及 [DONE] 不改。
+ * 流式 SSE 归一化管道。逐行缓冲以处理 TCP/Fetch chunk 恰好切在 SSE 行中间的情况；
+ * 非 data 行及 [DONE] 不改。空 reasoning_content 的清理是**无条件**的（见 normalizeSseLine）。
  */
-function createFinishReasonNormalizer() {
+function createSseNormalizer(opts) {
+  const fixFinishReason = !!(opts && opts.fixFinishReason);
   let pending = '';
   return new Transform({
     transform(chunk, _encoding, callback) {
@@ -1399,12 +1417,12 @@ function createFinishReasonNormalizer() {
         pending = pending.slice(newline + 1);
         const line = raw.endsWith('\r\n') ? raw.slice(0, -2) : raw.slice(0, -1);
         const ending = raw.endsWith('\r\n') ? '\r\n' : '\n';
-        this.push(`${normalizeSseLine(line)}${ending}`);
+        this.push(`${normalizeSseLine(line, fixFinishReason)}${ending}`);
       }
       callback();
     },
     flush(callback) {
-      if (pending) this.push(normalizeSseLine(pending));
+      if (pending) this.push(normalizeSseLine(pending, fixFinishReason));
       callback();
     },
   });
@@ -1416,9 +1434,11 @@ async function relay(resp, res, isStream, abortSignal, slot, attemptNo, userName
   if (isStream) {
     res.writeHead(resp.status, headers);
     const upstreamStream = Readable.fromWeb(resp.body);
-    const nodeStream = slot.target.provider.normalizeEmptyFinishReason
-      ? upstreamStream.pipe(createFinishReasonNormalizer())
-      : upstreamStream;
+    // 一律过归一化管道：空 reasoning_content 必须清掉（否则下游会把每个正文分片当成思考块），
+    // finish_reason 归一仍按 provider 的 normalizeEmptyFinishReason 开关
+    const nodeStream = upstreamStream.pipe(createSseNormalizer({
+      fixFinishReason: !!slot.target.provider.normalizeEmptyFinishReason,
+    }));
     const destroyStreams = () => {
       upstreamStream.destroy();
       if (nodeStream !== upstreamStream) nodeStream.destroy();
