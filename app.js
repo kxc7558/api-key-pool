@@ -238,6 +238,7 @@ function viewHome(){
     </section>
     <section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin:36px 0">
       <div class="card"><h3>统一入口</h3><p style="font-size:13px;color:var(--muted)">OpenAI 兼容协议,一个地址、一个 Key。模型别名随取:auto / pro / flash / kimi / qwen。</p></div>
+      <div class="card"><h3>两种协议</h3><p style="font-size:13px;color:var(--muted)">同时说 OpenAI 兼容协议和 Anthropic Messages 协议。Claude Code 直接指过来就行,不用再挂转换代理。</p></div>
       <div class="card"><h3>限流自愈</h3><p style="font-size:13px;color:var(--muted)">撞 429 自动换 Key 重试;额度用尽按平台重置周期冷却;半开探活自动复活误伤的 Key。</p></div>
       <div class="card"><h3>用量透明</h3><p style="font-size:13px;color:var(--muted)">每个账号的调用次数、配额余量、模型分布实时可查,密钥自主管理。</p></div>
     </section>
@@ -250,8 +251,13 @@ client = OpenAI(
 r = client.chat.completions.create(
     model="auto", messages=[{"role":"user","content":"你好"}])</pre>
     </div>
+    <div class="card" style="background:#14161f;border-color:#14161f;margin-top:12px">
+      <pre class="mono" style="color:#d6dcff;font-size:13px;line-height:1.8;margin:0;overflow:auto"><span style="color:#7e85a8"># Claude Code 直连(池子原生说 Anthropic 协议,不需要转换代理)</span>
+ANTHROPIC_BASE_URL=${esc(base)}
+ANTHROPIC_AUTH_TOKEN=你的分发 Key   <span style="color:#7e85a8"># 设好环境变量后直接 claude</span></pre>
+    </div>
     <footer style="border-top:1px solid var(--border);padding:24px 0 40px;color:var(--muted);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">
-      <div>API Key 代理池 · 零依赖 · OpenAI 兼容</div>
+      <div>API Key 代理池 · 零依赖 · OpenAI 兼容 + Anthropic Messages</div>
       <div><a href="#/login">管理入口</a></div>
     </footer>
   </div>`;

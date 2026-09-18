@@ -20,6 +20,7 @@ const path = require('node:path');
 const os = require('node:os');
 const tls = require('node:tls');
 const { Readable, Transform } = require('node:stream');
+const ANTHROPIC = require('./anthropic');
 
 // ---------------------------------------------------------------- 配置加载
 
@@ -1229,6 +1230,9 @@ function buildUpstreamHeaders(clientHeaders, provider, keyValue, isStream) {
     const lk = k.toLowerCase();
     if (HOP_BY_HOP.has(lk)) continue;
     if (lk === 'authorization' || lk === 'content-type' || lk === 'host' || lk === 'accept' || lk === 'accept-encoding') continue;
+    // x-api-key 是 Anthropic 客户端的凭证头。它是 x- 开头，若照「透传 x-」的规则
+    // 会被原样发到上游 —— 等于把我们的分发 Key 泄给上游平台，必须显式挡掉。
+    if (lk === 'x-api-key') continue;
     if (lk.startsWith('x-') && isHeaderSafe(v)) h[k] = v;
   }
   if (provider.authHeader) h[provider.authHeader] = (provider.authPrefix || '') + keyValue;
@@ -1258,6 +1262,64 @@ function sendJson(res, status, obj) {
   const body = Buffer.from(JSON.stringify(obj, null, 2), 'utf8');
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': body.length });
   res.end(body);
+}
+
+/**
+ * 取客户端凭证：OpenAI 系客户端用 Authorization: Bearer，Anthropic 系用 x-api-key。
+ * 两者都认，同一个分发 Key 既能给 OpenAI SDK 用也能给 Claude Code 用。
+ */
+function clientToken(req) {
+  const auth = String(req.headers.authorization || '');
+  if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+  const xk = String(req.headers['x-api-key'] || '').trim();
+  return xk || '';
+}
+
+/** 这次请求说的是不是 Anthropic 协议（决定错误体按哪种格式回） */
+function isAnthropicRequest(p, req) {
+  return p === '/v1/messages' || p === '/v1/messages/count_tokens' || !!req.headers['anthropic-version'];
+}
+
+/** 中转站对外暴露的代理端点：只有这些允许跨域（CORS），也只有这些走分发 Key 鉴权 */
+const PROXY_ENDPOINTS = new Set([
+  '/v1/chat/completions', '/chat/completions',
+  '/v1/models', '/models',
+  '/v1/messages', '/v1/messages/count_tokens',
+]);
+
+/* ---------- 协议适配：调度链路只认 OpenAI，出入两端按需翻译 ---------- */
+
+/** OpenAI 原生：直接透传，什么都不改 */
+const OPENAI_PROTO = {
+  anthropic: false,
+  error: (res, status, message, type, extra) => sendJson(res, status, { error: Object.assign({ message, type: type || 'invalid_request_error' }, extra) }),
+  upstreamError: (res, status, text) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(text || '');
+  },
+};
+
+/** Anthropic：进去转 OpenAI，出来转 Anthropic */
+function anthropicProto(meta) {
+  return {
+    anthropic: true,
+    meta,
+    error: (res, status, message, type) => ANTHROPIC.sendError(res, status, message, type),
+    upstreamError: (res, status, text) => {
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_) {}
+      const e = (parsed && (parsed.error || parsed)) || {};
+      ANTHROPIC.sendError(res, status, e.message || text || '上游返回错误', ANTHROPIC.mapErrorType(e.type || e.code));
+    },
+    // 流式：整段重新编码成 Anthropic SSE（不再走原样透传的归一化管道）
+    streamTransform: () => ANTHROPIC.createStreamTranslator(meta),
+    // 非流式：OpenAI JSON → Anthropic JSON
+    transformJson: (buf) => {
+      let oai;
+      try { oai = JSON.parse(buf.toString('utf8')); } catch (_) { return null; }
+      return Buffer.from(JSON.stringify(ANTHROPIC.jsonToAnthropic(oai, meta)), 'utf8');
+    },
+  };
 }
 
 function parseRetryAfter(resp) {
@@ -1430,16 +1492,21 @@ function createSseNormalizer(opts) {
 }
 
 /** 把上游响应转发给客户端（流式 / 非流式统一处理）。返回 { usage } 供调用日志记 token（流式拿不到，为 null） */
-async function relay(resp, res, isStream, abortSignal, slot, attemptNo, userName) {
+async function relay(resp, res, isStream, abortSignal, slot, attemptNo, userName, proto) {
+  const p = proto || OPENAI_PROTO;
   const headers = buildResponseHeaders(resp, slot, attemptNo, userName);
   if (isStream) {
+    // Anthropic 协议要整段重新编码，不能原样透传上游的 OpenAI 分片
+    if (p.anthropic) headers['content-type'] = 'text/event-stream; charset=utf-8';
     res.writeHead(resp.status, headers);
     const upstreamStream = Readable.fromWeb(resp.body);
-    // 一律过归一化管道：空 reasoning_content 必须清掉（否则下游会把每个正文分片当成思考块），
+    // OpenAI 路径一律过归一化管道：空 reasoning_content 必须清掉（否则下游会把每个正文分片当成思考块），
     // finish_reason 归一仍按 provider 的 normalizeEmptyFinishReason 开关
-    const nodeStream = upstreamStream.pipe(createSseNormalizer({
-      fixFinishReason: !!slot.target.provider.normalizeEmptyFinishReason,
-    }));
+    const nodeStream = p.anthropic
+      ? upstreamStream.pipe(p.streamTransform())
+      : upstreamStream.pipe(createSseNormalizer({
+        fixFinishReason: !!slot.target.provider.normalizeEmptyFinishReason,
+      }));
     const destroyStreams = () => {
       upstreamStream.destroy();
       if (nodeStream !== upstreamStream) nodeStream.destroy();
@@ -1459,44 +1526,49 @@ async function relay(resp, res, isStream, abortSignal, slot, attemptNo, userName
     });
     return { usage: null };
   }
-  const buf = Buffer.from(await resp.arrayBuffer());
+  const raw = Buffer.from(await resp.arrayBuffer());
   // 非流式上游响应大小上限：防异常上游返回超大 body 拖垮内存
-  if (buf.length > MAX_UPSTREAM_BODY) {
-    log('warn', `上游响应过大 ${buf.length} 字节 > ${MAX_UPSTREAM_BODY}，已截断返回 502`, 'yellow');
-    sendJson(res, 502, { error: { message: `上游响应过大（${buf.length} 字节）`, type: 'upstream_too_large' } });
+  if (raw.length > MAX_UPSTREAM_BODY) {
+    log('warn', `上游响应过大 ${raw.length} 字节 > ${MAX_UPSTREAM_BODY}，已截断返回 502`, 'yellow');
+    p.error(res, 502, `上游响应过大（${raw.length} 字节）`, 'upstream_too_large');
     return { usage: null };
+  }
+  const usage = parseUsage(raw); // 始终按上游原始（OpenAI 形态）解析，与回给客户端的格式无关
+  let buf = raw;
+  if (p.transformJson) {
+    const converted = p.transformJson(raw);
+    if (!converted) {
+      p.error(res, 502, '上游返回的不是合法 JSON，无法转换协议格式', 'api_error');
+      return { usage: null };
+    }
+    buf = converted;
   }
   headers['content-length'] = buf.length;
   res.writeHead(resp.status, headers);
   res.end(buf);
-  return { usage: parseUsage(buf) };
+  return { usage };
 }
 
 // ---------------------------------------------------------------- 请求处理
 
-async function handleChat(req, res, bodyObj) {
+async function handleChat(req, res, bodyObj, proto) {
   const tStart = Date.now();
+  const P = proto || OPENAI_PROTO;
   const model = bodyObj && bodyObj.model;
-  if (!model) return sendJson(res, 400, { error: { message: '缺少 model 字段', type: 'invalid_request_error' } });
+  if (!model) return P.error(res, 400, '缺少 model 字段', 'invalid_request_error');
 
   // 模型级熔断：该模型近期连续全败 → 秒回 503，不再反复试错 / 傻等排队
   const brk = breakerCheck(model);
   if (brk.open) {
     logUsage(makeUsageEntry(req, { model, status: 503, latencyMs: Date.now() - tStart, errorType: 'circuit_open' }));
     res.setHeader('retry-after', String(Math.ceil(brk.retryAfterMs / 1000)));
-    return sendJson(res, 503, {
-      error: {
-        message: `模型「${model}」正处熔断窗口（近期连续失败），请 ${Math.ceil(brk.retryAfterMs / 1000)} 秒后重试`,
-        type: 'circuit_open',
-        retryAfterMs: Math.ceil(brk.retryAfterMs),
-      },
-    });
+    return P.error(res, 503, `模型「${model}」正处熔断窗口（近期连续失败），请 ${Math.ceil(brk.retryAfterMs / 1000)} 秒后重试`, 'circuit_open', { retryAfterMs: Math.ceil(brk.retryAfterMs) });
   }
 
   const targetsAll = POOL.resolveTargets(model);
   if (!targetsAll.length) {
     logUsage(makeUsageEntry(req, { model, status: 400, latencyMs: Date.now() - tStart, errorType: 'no_target' }));
-    return sendJson(res, 400, { error: { message: `未配置任何可用平台，请检查 config.json 的 providers`, type: 'invalid_request_error' } });
+    return P.error(res, 400, '未配置任何可用平台，请检查 config.json 的 providers', 'invalid_request_error');
   }
   // 跳过已判定失效的候选（模型下线/不存在）：否则每次请求都会白试一次并可能把错误抛给客户端
   const targets = targetsAll.filter((t) => !targetDeadReason(t));
@@ -1504,12 +1576,7 @@ async function handleChat(req, res, bodyObj) {
     const why = targetsAll.map((t) => `${t.provider.name}:${t.model}（${targetDeadReason(t)}）`).join('；');
     logUsage(makeUsageEntry(req, { model, status: 503, latencyMs: Date.now() - tStart, errorType: 'all_targets_dead' }));
     log('error', `别名「${model}」的候选全部失效：${why}`, 'red');
-    return sendJson(res, 503, {
-      error: {
-        message: `别名「${model}」的候选当前都不可用：${why}。请到管理台「模型」页把已下线的模型换掉（失效标记 1 小时后自动过期重试）`,
-        type: 'all_targets_dead',
-      },
-    });
+    return P.error(res, 503, `别名「${model}」的候选当前都不可用：${why}。请到管理台「模型」页把已下线的模型换掉（失效标记 1 小时后自动过期重试）`, 'all_targets_dead');
   }
 
   const isStream = !!bodyObj.stream;
@@ -1578,7 +1645,7 @@ async function handleChat(req, res, bodyObj) {
 
     if (r.kind === 'ok') {
       breakerSuccess(model);
-      const rel = await relay(r.resp, res, isStream, clientAbort.signal, slot, i, req.poolUser);
+      const rel = await relay(r.resp, res, isStream, clientAbort.signal, slot, i, req.poolUser, P);
       logUsage(makeUsageEntry(req, {
         model, provider: slot.target.provider.name, keyId: slot.key.id,
         status: r.resp.status, latencyMs: Date.now() - tStart, tokens: rel.usage, stream: isStream,
@@ -1594,9 +1661,7 @@ async function handleChat(req, res, bodyObj) {
         model, provider: slot.target.provider.name, keyId: slot.key.id,
         status: r.status, latencyMs: Date.now() - tStart, stream: isStream, errorType: 'fatal',
       }));
-      res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(r.text || '');
-      return;
+      return P.upstreamError(res, r.status, r.text);
     }
     errors.push({ attempt: i, key: slot.key.id, provider: slot.target.provider.name, status: r.status, error: String(r.text || '').slice(0, 300) });
   }
@@ -1619,13 +1684,9 @@ async function handleChat(req, res, bodyObj) {
     model, status: 503, latencyMs: Date.now() - tStart, stream: isStream,
     errorType: errors.length > 0 ? 'no_available_key' : 'queue_timeout',
   }));
-  sendJson(res, 503, {
-    error: {
-      message: msg,
-      type: 'no_available_key',
-      retryAfterMs: Number.isFinite(wait) ? Math.ceil(wait) : null,
-      attempts: errors,
-    },
+  P.error(res, 503, msg, 'no_available_key', {
+    retryAfterMs: Number.isFinite(wait) ? Math.ceil(wait) : null,
+    attempts: errors,
   });
 }
 
@@ -1639,6 +1700,22 @@ async function handleModels(req, res) {
   }
   if (CONFIG.exposePassthrough) {
     for (const p of POOL.providers.values()) list.push({ id: `${p.name}:__passthrough__`, object: 'model', created: 0, owned_by: 'api-key-pool' });
+  }
+  // Anthropic 的 /v1/models 是另一套结构（type/display_name + 游标分页），
+  // 按 anthropic-version 头判断调用方说哪种协议，避免 Claude Code 解析失败
+  if (req.headers['anthropic-version']) {
+    const data = list.map((m) => ({
+      type: 'model',
+      id: m.id,
+      display_name: m.id,
+      created_at: new Date(m.created ? m.created * 1000 : Date.now()).toISOString(),
+    }));
+    return sendJson(res, 200, {
+      data,
+      has_more: false,
+      first_id: data.length ? data[0].id : null,
+      last_id: data.length ? data[data.length - 1].id : null,
+    });
   }
   sendJson(res, 200, { object: 'list', data: list });
 }
@@ -2563,7 +2640,7 @@ const server = http.createServer(async (req, res) => {
     // CORS 预检：仅代理接口（/v1/*）放行跨域——中转站客户端 SDK 需要；
     // 管理/统计/仪表盘接口不返回 CORS 头，浏览器跨站 JS 读不到响应（防配置与 Key 被恶意网页窃取）
     if (req.method === 'OPTIONS') {
-      const isProxy = p === '/v1/chat/completions' || p === '/chat/completions' || p === '/v1/models' || p === '/models';
+      const isProxy = PROXY_ENDPOINTS.has(p);
       if (isProxy) {
         res.writeHead(204, {
           'access-control-allow-origin': '*',
@@ -2580,34 +2657,37 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
 
-    // 代理接口鉴权（中转站模式）
-    const isProxyPath = p === '/v1/chat/completions' || p === '/chat/completions' || p === '/v1/models' || p === '/models';
+    // 代理接口鉴权（中转站模式）。凭证：OpenAI 系用 Authorization: Bearer，Anthropic 系用 x-api-key
+    const isProxyPath = PROXY_ENDPOINTS.has(p);
     if (isProxyPath) {
-      const auth = String(req.headers.authorization || '');
-      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      const token = clientToken(req);
+      // 错误体按调用方说的协议回：Claude Code 收到 OpenAI 格式的错误会解析失败
+      const fail = (status, message, type) => (isAnthropicRequest(p, req)
+        ? ANTHROPIC.sendError(res, status, message, type)
+        : sendJson(res, status, { error: { message, type } }));
       if (accessUsers.size > 0) {
         // 多用户分发 Key 模式
         const user = accessUsers.get(token);
         if (!user) {
           logUsage({ ts: Date.now(), caller: null, callerName: null, model: null, provider: null, keyId: null, status: 401, latencyMs: 0, tokens: null, stream: false, errorType: 'auth_fail' });
-          return sendJson(res, 401, { error: { message: '无效的访问 Key', type: 'auth_error' } });
+          return fail(401, '无效的访问 Key', 'auth_error');
         }
         req.poolUser = 'user-' + user.idx; // HTTP 头只允许 Latin-1，中文名不进 header
         req.poolUserObj = user;            // 调用日志取 callerName 用
-        // 仅对话请求记配额；/v1/models 等只做鉴权，不消耗用户的 RPM/每日次数
-        if (p === '/v1/chat/completions' || p === '/chat/completions') {
+        // 仅对话请求记配额；/v1/models、count_tokens 只做鉴权，不消耗用户的 RPM/每日次数
+        if (p === '/v1/chat/completions' || p === '/chat/completions' || p === '/v1/messages') {
           const q = userQuotaCheck(user, Date.now());
           if (!q.ok) {
             logUsage(makeUsageEntry(req, { status: 429, latencyMs: 0, errorType: 'quota_exceeded' }));
             res.setHeader('retry-after', String(q.retryAfterSec));
-            return sendJson(res, 429, { error: { message: `请求过于频繁：${q.reason}`, type: 'rate_limit_error' } });
+            return fail(429, `请求过于频繁：${q.reason}`, 'rate_limit_error');
           }
         }
       } else if (CONFIG.proxyApiKey) {
         // 旧版单 Key 模式
         if (token !== CONFIG.proxyApiKey) {
           logUsage({ ts: Date.now(), caller: null, callerName: null, model: null, provider: null, keyId: null, status: 401, latencyMs: 0, tokens: null, stream: false, errorType: 'auth_fail' });
-          return sendJson(res, 401, { error: { message: '代理鉴权失败', type: 'auth_error' } });
+          return fail(401, '代理鉴权失败', 'auth_error');
         }
       }
     }
@@ -2638,6 +2718,39 @@ const server = http.createServer(async (req, res) => {
       return handleStats(res);
     }
     if (p === '/v1/models' && req.method === 'GET') return await handleModels(req, res);
+
+    // ------------------------------------------------ Anthropic Messages 协议（Claude Code 等）
+    // 入口把 Anthropic 请求翻成 OpenAI，交给同一条调度链路（轮询/429换Key/冷却/熔断/排队全复用），
+    // 出口再把上游的 OpenAI 响应翻回 Anthropic。格式转换层见 anthropic.js。
+    if (p === '/v1/messages' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let ab;
+      try {
+        ab = JSON.parse(raw.toString('utf8'));
+      } catch (e) {
+        return ANTHROPIC.sendError(res, 400, '请求体不是合法 JSON', 'invalid_request_error');
+      }
+      const conv = ANTHROPIC.toOpenAI(ab);
+      if (conv.error) return ANTHROPIC.sendError(res, 400, conv.error, 'invalid_request_error');
+      return await handleChat(req, res, conv.body, anthropicProto(conv.meta));
+    }
+    // count_tokens：本地估算，不打上游（省额度，也不受上游是否支持所限）
+    if (p === '/v1/messages/count_tokens' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let ab;
+      try {
+        ab = JSON.parse(raw.toString('utf8'));
+      } catch (e) {
+        return ANTHROPIC.sendError(res, 400, '请求体不是合法 JSON', 'invalid_request_error');
+      }
+      // count_tokens 的请求体可能没有 model/messages（只数一段文本），补默认值让转换器能跑
+      const conv = ANTHROPIC.toOpenAI(Object.assign({}, ab, {
+        model: ab.model || '__count__',
+        messages: Array.isArray(ab.messages) && ab.messages.length ? ab.messages : [{ role: 'user', content: '' }],
+      }));
+      if (conv.error) return ANTHROPIC.sendError(res, 400, conv.error, 'invalid_request_error');
+      return sendJson(res, 200, { input_tokens: conv.meta.inputTokens });
+    }
 
     // 管理操作台
     if (p === '/admin' || p === '/admin/') return handleAdminPage(res);

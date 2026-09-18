@@ -1,6 +1,6 @@
 # API Key 代理池
 
-把多个免费 API 的 Key 聚合成**一个 OpenAI 兼容地址**。业务代码里只改 `base_url`，剩下的调度、重试、容灾全部由代理池接管。
+把多个免费 API 的 Key 聚合成**一个网关地址**，同时说 **OpenAI 兼容协议**和 **Anthropic Messages 协议**。业务代码里只改 `base_url`，剩下的调度、重试、容灾全部由代理池接管。Claude Code 可以直接指过来，不用再挂转换代理。
 
 零第三方依赖，Node.js 18+ 即可运行（推荐 20/22）。
 
@@ -11,6 +11,7 @@
 | 能力 | 说明 |
 |---|---|
 | **统一入口** | 英伟达、商汤等不同平台合成一个地址，用模型别名调用，不用关心背后是谁 |
+| **两种协议** | OpenAI 兼容（`/v1/chat/completions`）+ Anthropic Messages（`/v1/messages`），同一套调度在背后，Key 两边通用 |
 | **轮流调用** | 多个 Key 轮询分摊请求，不会揪着一个薅 |
 | **429 自动换 Key** | 撞上限流立刻换下一个 Key 重试，客户端完全无感 |
 | **冷却与退避** | 被限流的 Key 进冷却期；连续被限流则指数退避（60s → 2min → … → 10min 封顶） |
@@ -98,6 +99,49 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 **桌面客户端**（Chatbox / Cherry Studio / NextChat / LobeChat 等）：新建 OpenAI 类型的渠道，API 地址填 `http://127.0.0.1:8787/v1`，密钥填分发 Key（见 `config.json` 的 `accessKeys`；不要写中文，HTTP 头不支持），模型名填 `auto`。
 
 **Claude Code / Cursor / Cline 类工具**：在其 OpenAI 兼容配置项里填同一个地址即可。
+
+---
+
+## Claude Code 直连（Anthropic Messages 协议）
+
+池子**原生支持 Anthropic 的 Messages 协议**，所以 Claude Code 可以直接指过来，**不需要再挂 cc-switch 之类的转换代理**——少一跳、少一个故障点。
+
+```bash
+# Windows PowerShell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8787"
+$env:ANTHROPIC_AUTH_TOKEN = "sk-pool-xxxxxxxx"     # 分发 Key
+claude
+```
+
+```bash
+# macOS / Linux
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
+export ANTHROPIC_AUTH_TOKEN="sk-pool-xxxxxxxx"
+claude
+```
+
+`model` 填池子的别名（`auto` / `pro` / `flash` / `lite` …）。拿不准就跑 `node scripts/key-pool.js claude`，它会按当前池子打印一份填好的配置。
+
+| 端点 | 说明 |
+|---|---|
+| `POST /v1/messages` | Claude Messages 格式；流式/非流式都支持 |
+| `POST /v1/messages/count_tokens` | 上下文 token 估算（**本地算，不打上游、不耗额度**） |
+| `GET /v1/models` | 带 `anthropic-version` 头时返回 Anthropic 结构，否则返回 OpenAI 结构 |
+
+**它是怎么工作的**：转换只发生在**边界**——入口把 Anthropic 请求翻成 OpenAI，出口把上游的 OpenAI 响应翻回 Anthropic（`anthropic.js`）。中间走的**是同一条**调度链路，所以轮询、429 换 Key、冷却退避、连坐、熔断、排队全部照旧生效。
+
+几个已经处理掉的差异，值得知道：
+
+| 差异 | 池子的处理 |
+|---|---|
+| Anthropic 允许一条消息里混 `tool_result` 和文本 | 自动拆成 OpenAI 的 `role:tool` 消息（排在 user 文本之前）+ user 消息 |
+| OpenAI 的 `tool_calls` 是分片累积的 | 转成 Anthropic 的 `content_block_start(tool_use)` + 一串 `input_json_delta` |
+| 上游的 `reasoning_content`（思考分片）在 Anthropic 侧没有可回放的等价物 | **丢弃**。不做 thinking 块（thinking 需要签名，回放不了），也顺便避免了界面上狂跳 Thinking |
+| Anthropic 必须回 `input_tokens`，而 OpenAI 流式默认不给 usage | 优先用上游真实值；上游不给就本地估算。**必须非零**——填 0 会让客户端以为上下文没占用，永远不触发自动压缩 |
+| Anthropic 的 `stop_sequences`、`metadata.user_id`、`tool_choice` 语义不同 | 分别映射到 `stop`、`user`、`auto`/`required`/`{type:function}` |
+
+> **没映射的**：`thinking`（思考开关）、服务端工具（`computer_*` / `web_search` 等，OpenAI 侧没有对应物）、`document` 类型的内容块。这些会被安静地丢掉，不会报错也不会污染发给上游的请求。
+> `count_tokens` 是估算（英文约 4 字符/token，中文约 1 字/token），量级对但不是账单依据。
 
 ---
 
@@ -343,9 +387,13 @@ POOL_KEY=sk-pool-xxx node test.js 12 pro # 指定模型别名
 不想消耗真实额度，可以跑本地模拟上游的纯逻辑验证（不联网）：
 
 ```bash
-node tests/mock-upstream.js          # 终端 1：模拟上游（含 401/429/慢节点）
+node tests/mock-upstream.js          # 终端 1：模拟上游（含 401/429/慢节点/工具调用/思考分片）
 POOL_CONFIG=tests/config.test.json node server.js   # 终端 2：测试用代理池
 node tests/verify.js                 # 终端 3：14 项断言
+
+# Anthropic 协议专项（另起一个端口的池子，与上面互不干扰）
+POOL_CONFIG=tests/config.anthropic.json node server.js   # 端口 8891
+node tests/verify-anthropic.js       # 61 项断言：转换单测 + 协议形状 + 流式事件序列 + 老路径回归
 ```
 
 ---
@@ -389,6 +437,16 @@ curl http://你的IP:8787/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"你好"}]}'
 ```
 
+说 Anthropic 协议的客户端（Claude Code 等）用另一个端点，凭证换成 `x-api-key`：
+
+```bash
+curl http://你的IP:8787/v1/messages \
+  -H "x-api-key: sk-发给他的key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"auto","max_tokens":256,"messages":[{"role":"user","content":"你好"}]}'
+```
+
 查你的局域网 IP：`ipconfig` 里 IPv4 地址（如 `192.168.137.83`）。
 
 **三种接入范围：**
@@ -405,9 +463,13 @@ curl http://你的IP:8787/v1/chat/completions \
 
 ```
 api-key-pool/
-├── server.js                  代理池主服务（唯一核心文件）
+├── server.js                  代理池主服务（调度 / 代理 / 管理 API）
+├── anthropic.js               协议转换层：Anthropic Messages ⇄ OpenAI（/v1/messages 用）
+├── agent.js                   数字员工的对话与执行（网页员工窗口用）
 ├── config.json                配置：Key、平台、模型别名、限流参数
-├── admin.html                 操作台（图形化管理界面，访问 /admin）
+├── app.html / app.js          单页操作台（访问 /app）——管理台、登录、试一下、员工对话
+├── scripts/key-pool.js        操作 CLI（零依赖；分级授权由代码强制，高风险要 --yes）
+├── .claude/agents/            数字员工定义（key-pool-operator.md，六段式）
 ├── start.bat                  启动（前台，看日志）
 ├── start-bg.vbs               启动（后台静默 + 自动开面板）
 ├── stop.bat                   停止
@@ -422,12 +484,13 @@ api-key-pool/
 ├── daily-report.js            每日用量报表（node daily-report.js，生成 reports/）
 ├── reports/                   日报输出目录（每日一份 HTML）
 ├── tests/                     本地模拟验证（不联网、不消耗额度）
-│   ├── mock-upstream.js       模拟上游 API（BAD1/RATE1/RATE2/RATE2B/ALWAYS429/REVIVE1/SLOW1）
+│   ├── mock-upstream.js       模拟上游 API（BAD1/RATE1/RATE2/RATE2B/ALWAYS429/REVIVE1/SLOW1/TOOL1/REASON1）
 │   ├── verify.js              端到端回归（14 项：下线/轮询/429/并发/SSE/分组配额）
+│   ├── verify-anthropic.js    Anthropic 协议专项（61 项：转换单测/协议形状/流式事件序列/回归）
 │   ├── verify-scheduler.js    调度增强专项（连坐冷却 + 模型熔断 + 排队不熔断，12 项）
 │   ├── verify-halfopen.js     调度增强专项（半开探活回池 + 死 Key 复活，7 项）
-│   └── config*.test.json      各专项用的代理池配置
-└── logs/                      start-bg.vbs 的日志目录（运行后自动创建）
+│   └── config.*.json          各专项用的代理池配置
+└── logs/                      运行日志与调用日志（logs/usage/ 按天 JSONL）
 ```
 
 > 服务遇到任何异常（包括漏网的未捕获异常）都只记录日志、不退出进程，会持续常驻。
@@ -459,3 +522,4 @@ POOL_ADMIN_TOKEN=xxx node daily-report.js   # 设了 adminToken 后需要
 - 默认只监听 `127.0.0.1`，外部机器访问不到。改成 `0.0.0.0` 供局域网/公网使用时，**必须配置 `accessKeys`（或 `proxyApiKey`）**，否则任何人都能白嫖你的额度 —— 启动时会红字警告。
 - 分发给别人的 Key 不要用 `sk-` 前缀（和上游 Key 混淆），用 `sk-pool-xxx` 之类，方便从日志里区分。
 - 也可以不在文件里写明文：把 Key 存进系统环境变量，`config.json` 里写 `"env:NVIDIA_KEY_1"`，代理池启动时自动读取。
+- **客户端凭证不会被转发给上游**：`Authorization` 和 `x-api-key`（Anthropic 客户端用这个头）都会在转发前被摘掉，换成该上游自己的 Key。其余 `x-` 开头的自定义头照旧透传。

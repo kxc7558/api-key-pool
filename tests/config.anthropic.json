@@ -1,0 +1,44 @@
+{
+  "host": "127.0.0.1",
+  "port": 8891,
+  "maxAttempts": 4,
+  "waitForSlotMs": 1500,
+  "cooldownMs": 2000,
+  "maxCooldownMs": 5000,
+  "serverErrorCooldownMs": 500,
+  "requestTimeoutMs": 15000,
+  "strategy": "round-robin",
+  "logLevel": "warn",
+  "defaults": { "rpmPerKey": 0, "maxConcurrencyPerKey": 0 },
+  "accessKeys": {
+    "sk-pool-test-anthropic-0001": { "name": "claude-code", "rpm": 0, "daily": 0 }
+  },
+  "providers": [
+    {
+      "name": "mockTool",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": ["TOOL1"]
+    },
+    {
+      "name": "mockReason",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": ["REASON1"]
+    },
+    {
+      "name": "mockPlain",
+      "baseUrl": "http://127.0.0.1:8899/v1",
+      "keys": ["MOCK-P1"]
+    }
+  ],
+  "models": {
+    "auto": [
+      { "provider": "mockPlain", "model": "mock-model" }
+    ],
+    "tool": [
+      { "provider": "mockTool", "model": "mock-model" }
+    ],
+    "reason": [
+      { "provider": "mockReason", "model": "mock-model" }
+    ]
+  }
+}

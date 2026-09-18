@@ -113,6 +113,7 @@ api-key-pool 操作 CLI  —— 目标: ${BASE}
   usage [--days=7]           用量趋势（按天/按模型/按用户）
   models [--provider=名]     模型别名；带 --provider 则列该平台可选模型
   test [--model=auto] [--msg=文字]   发一条真实测试消息
+  claude                     打印「把 Claude Code 接到池子」的配置方法
   health                     健康检查
 
 低风险写（自动备份）:
@@ -192,6 +193,41 @@ CMD.usage = async () => {
   for (const x of (d.daily || [])) P(`  ${x.date}  ${String(x.calls).padStart(4)} 次  (成功 ${x.ok} / 失败 ${x.fail})`);
   if ((d.byCaller || []).length) { P('\n按用户:'); for (const c of d.byCaller) P(`  ${String(c.name).padEnd(14)} ${c.calls} 次`); }
   if ((d.byModel || []).length) { P('\n按模型:'); for (const m of d.byModel) P(`  ${String(m.model).padEnd(22)} ${m.calls} 次`); }
+};
+
+/**
+ * 打印「把 Claude Code 接到池子」的配置方法。
+ * 池子原生支持 Anthropic Messages 协议（/v1/messages），所以不需要再挂
+ * cc-switch 之类的 OpenAI↔Anthropic 转换代理——少一跳、少一个故障点。
+ * 注意：这里**不打印任何分发 Key 的值**，只给占位符（Key 在管理台复制）。
+ */
+CMD.claude = async () => {
+  const origin = BASE.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+  let aliases = [], keyCount = 0;
+  try {
+    const cfg = await loadCfg();
+    aliases = Object.keys(cfg.models || {}).filter((a) => !a.startsWith('_'));
+    keyCount = Object.keys(cfg.accessKeys || {}).length;
+  } catch (_) {}
+
+  P(`把 Claude Code（或任何 Anthropic 协议客户端）直接指到池子 ${origin}
+
+  Windows PowerShell:
+    $env:ANTHROPIC_BASE_URL = "${origin}"
+    $env:ANTHROPIC_AUTH_TOKEN = "<分发 Key>"
+    claude
+
+  macOS / Linux:
+    export ANTHROPIC_BASE_URL="${origin}"
+    export ANTHROPIC_AUTH_TOKEN="<分发 Key>"
+    claude
+
+  · 分发 Key 在管理台「分发密钥」页生成/复制（当前池内共 ${keyCount} 个）
+  · 池子同时认 x-api-key 和 Authorization: Bearer，所以 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 都可用
+  · model 填池子的别名${aliases.length ? '：' + aliases.slice(0, 12).join(' / ') + (aliases.length > 12 ? ' …' : '') : ''}
+  · 调度（轮询 / 429 换 Key / 冷却 / 熔断 / 排队）对 Claude Code 一样生效
+  · 上游的思考分片会被丢弃，不会在界面上狂跳 Thinking
+  · /v1/messages/count_tokens 走本地估算：不打上游、不耗额度，供客户端显示上下文占用`);
 };
 
 CMD.models = async () => {

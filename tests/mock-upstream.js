@@ -75,6 +75,48 @@ http.createServer((req, res) => {
     }
     if (auth === 'SLOW1') await new Promise((r) => setTimeout(r, 3000));
 
+    // TOOL1：返回工具调用（验 Anthropic 转换里 tool_use / input_json_delta 那一段）
+    if (String(auth).startsWith('TOOL1')) {
+      const fnName = 'get_weather';
+      const fnArgs = '{"city":"北京","unit":"celsius"}';
+      if (body.stream) {
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+        const frames = [
+          { delta: { role: 'assistant', content: '' }, finish_reason: null },
+          { delta: { tool_calls: [{ index: 0, id: 'call_mock_1', type: 'function', function: { name: fnName, arguments: '' } }] }, finish_reason: null },
+          { delta: { tool_calls: [{ index: 0, function: { arguments: fnArgs.slice(0, 12) } }] }, finish_reason: null },
+          { delta: { tool_calls: [{ index: 0, function: { arguments: fnArgs.slice(12) } }] }, finish_reason: null },
+          { delta: {}, finish_reason: 'tool_calls' },
+        ];
+        for (const f of frames) {
+          res.write(`data: ${JSON.stringify({ id: 'm', object: 'chat.completion.chunk', choices: [{ index: 0, delta: f.delta, finish_reason: f.finish_reason }] })}\n\n`);
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
+      return send(200, {
+        id: 'chatcmpl-mock', object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: body.model,
+        choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_mock_1', type: 'function', function: { name: fnName, arguments: fnArgs } }] }, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 7, completion_tokens: 11, total_tokens: 18 },
+      });
+    }
+
+    // REASON1：正文分片前先来一段 reasoning_content（验 Anthropic 侧应把它丢掉，不产生 thinking 块）
+    if (String(auth).startsWith('REASON1') && body.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      for (const piece of ['思考中', '……']) {
+        res.write(`data: ${JSON.stringify({ id: 'm', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { reasoning_content: piece }, finish_reason: null }] })}\n\n`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      for (const piece of ['你好', '，世界']) {
+        res.write(`data: ${JSON.stringify({ id: 'm', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] })}\n\n`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
     const content = `[${auth} 第${n}次] 收到: ${JSON.stringify((body.messages || []).slice(-1)[0]?.content || '')}`;
 
     if (body.stream) {
