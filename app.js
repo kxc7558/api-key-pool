@@ -11,7 +11,6 @@ let cfg = null;                // 配置副本(仅 admin 拉取)
 let stats = null;
 let token = localStorage.getItem('akp_admin_token') || '';   // Bearer 兼容(API 直调场景)
 let role = 'user';
-let dirty = false;
 let currentPage = '';
 let accessRows = [];           // 分发 Key 编辑中间层
 let statsTimer = null;
@@ -41,7 +40,49 @@ function toast(msg, kind){
   requestAnimationFrame(()=> t.classList.add('show'));
   setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=> t.remove(), 300); }, 2600);
 }
-function markDirty(){ dirty = true; const d=document.getElementById('dirty-dot'); if(d) d.classList.add('show'); }
+/* ================= 自动保存 =================
+ * 没有「保存配置」按钮了：改动由 markDirty 防抖后自动写盘。
+ * 危险点：保存完**绝不能**重载/重绘页面——正在输入的框会失焦、打字会被打断。
+ * 所以 autoSave 只写盘 + 更新状态，不碰 render()。 */
+const AUTOSAVE_DELAY_MS = 800;
+let autoSaveTimer = null, savingNow = false, saveAgain = false;
+let saveState = { kind: 'saved', detail: '' };   // saved | dirty | saving | warn | error
+
+const SAVE_STATE_LABEL = {
+  saved:  ['已自动保存', 'ok'],
+  dirty:  ['待保存…', 'dirty'],
+  saving: ['保存中…', 'dirty'],
+  warn:   ['已自动保存 · 有提示', 'warn'],
+  error:  ['未保存 · 需要处理', 'err'],
+};
+
+function saveStateHtml(){
+  const [text, cls] = SAVE_STATE_LABEL[saveState.kind] || SAVE_STATE_LABEL.saved;
+  return `<span class="save-state ${cls}" id="save-state" title="${esc(saveState.detail || '')}">${esc(text)}</span>`;
+}
+function paintSaveState(){
+  const el = document.getElementById('save-state');
+  if (!el) return;
+  const [text, cls] = SAVE_STATE_LABEL[saveState.kind] || SAVE_STATE_LABEL.saved;
+  el.className = 'save-state ' + cls;
+  el.textContent = text;
+  el.title = saveState.detail || '';
+  el.style.cursor = saveState.detail ? 'pointer' : 'default';
+  el.onclick = saveState.detail ? () => alert(saveState.detail) : null;
+}
+function setSaveState(kind, detail){
+  const was = saveState.kind;
+  saveState = { kind, detail: detail || '' };
+  paintSaveState();
+  // 只在"刚变成有硬错误"时提醒一次；打字过程中不反复弹
+  if (kind === 'error' && was !== 'error') toast('有配置问题，暂未保存（点右上角查看）', 'err');
+}
+
+function markDirty(){
+  if (saveState.kind !== 'saving') setSaveState('dirty');
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => { autoSaveTimer = null; autoSave(); }, AUTOSAVE_DELAY_MS);
+}
 function fmtUptime(sec){ sec=Math.floor(sec||0); const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60; return h?`${h}h${m}m`:(m?`${m}m${s}s`:`${s}s`); }
 function fmtTime(ts){ return ts ? new Date(ts).toLocaleString('zh-CN',{hour12:false}) : '—'; }
 function fmtDay(ts){ return new Date(ts + 8*3600000).toISOString().slice(0,10); }
@@ -114,8 +155,7 @@ function renderShell(title, contentHTML, opts){
       <div class="page-title">${esc(title)}</div>
       <div class="spacer"></div>
       ${opts.hideAddr?'':`<div class="addr hide-sm">服务 <code>${esc(location.host)}</code></div>`}
-      ${showSave?`<button class="btn ghost" id="btn-reload" title="放弃未保存修改,重新读取">重新加载</button>
-      <button class="btn primary" id="btn-save"><span class="dirty-dot" id="dirty-dot"></span>保存配置</button>`:''}
+      ${showSave?saveStateHtml():''}
     </header>
     <main id="main">${contentHTML||''}</main>
   </div>`;
@@ -126,10 +166,7 @@ function renderShell(title, contentHTML, opts){
   });
   const lo = document.getElementById('btn-logout');
   if (lo) lo.addEventListener('click', async ()=>{ await fetch('/api/auth/logout',{method:'POST',credentials:'include'}); localStorage.removeItem('akp_admin_token'); token=''; ME=null; navigate('#/'); });
-  const sv = document.getElementById('btn-save');
-  if (sv) sv.addEventListener('click', save);
-  const rl = document.getElementById('btn-reload');
-  if (rl) rl.addEventListener('click', ()=>{ dirty=false; loadConfig(); loadStats(); toast('已重新加载'); });
+  paintSaveState();
 }
 
 /* ================= 路由 ================= */
@@ -336,8 +373,7 @@ async function loadConfig(){
   if (r.status === 200){
     cfg = r.data.config;
     initAccessRows();
-    dirty = false;
-    const d = document.getElementById('dirty-dot'); if (d) d.classList.remove('show');
+    setSaveState('saved');
     render();
   }
 }
@@ -470,7 +506,7 @@ function renderKeys(){
   }).join('');
   main.innerHTML = `<div class="toolbar">
       <button class="btn" data-action="addProvider">+ 添加平台</button>
-      <span class="hint">改完点右上角「保存配置」热重载生效；带 @ 的 Key 属同一账号,请在平台里设「RPM / 账号」</span>
+      <span class="hint">改完自动保存生效；带 @ 的 Key 属同一账号，请在平台里设「RPM / 账号」</span>
     </div>${list || '<div class="empty">还没有平台，点「+ 添加平台」开始</div>'}`;
 }
 
@@ -664,7 +700,7 @@ function renderTokens(){
     <div class="card"><h3>分发 Key（accessKeys）</h3>
     <div class="tbl-wrap"><table><thead><tr><th>分发的 Key</th><th>名称/备注</th><th>RPM 上限</th><th>每日上限</th><th>启用</th><th></th></tr></thead>
     <tbody>${rows||'<tr><td colspan="6" class="faint">未配置分发 Key（当前无鉴权）</td></tr>'}</tbody></table></div>
-    <div class="hint" style="margin-top:10px">0 = 不限；取消「启用」勾选后该 Key 立即失效（需点保存生效）。</div></div>`;
+    <div class="hint" style="margin-top:10px">0 = 不限；取消「启用」勾选后该 Key 立即失效。</div></div>`;
 }
 function genKey(){
   return 'sk-pool-' + (crypto.randomUUID ? crypto.randomUUID().replace(/-/g,'') : Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,32);
@@ -1014,7 +1050,7 @@ function renderSettings(){
         <input type="checkbox" data-set="alert.onUserDailyExhausted" ${(cfg.alert||{}).onUserDailyExhausted!==false?'checked':''}> 用户配额用尽告警</label>
     </div>
   </div>
-  <div class="hint" style="margin-bottom:16px">改完点右上角「保存配置」；保存前会做一次配置体检，明显的问题会被拦下。</div>`;
+  <div class="hint" style="margin-bottom:16px">改完自动保存；保存前会做一次配置体检，明显的问题会被拦下并在右上角提示。</div>`;
   const cj = document.getElementById('collab-json');
   if (cj) cj.addEventListener('input', ()=>{
     try { cfg.collabTokens = cj.value.trim() ? JSON.parse(cj.value) : {}; markDirty(); cj.style.borderColor=''; }
@@ -1499,30 +1535,38 @@ function validateConfig(){
   if (problems.length) throw new Error(problems.slice(0,6).join('\n'));
   return warnings.length ? warnings.slice(0,8).join('\n') : null;
 }
-async function save(){
+/** 自动保存：由 markDirty 防抖触发（不再有「保存配置」按钮）。
+ *  两条铁律：
+ *   ① 有硬性配置错误就**不写盘**，把问题挂在右上角状态上（不弹 alert，免得打字被打断）
+ *   ② 保存完**不重载、不重绘**——否则正在输入的输入框会失焦
+ *  服务端覆盖前会自动备份（~/.api-key-pool-backups/），可回滚。 */
+async function autoSave(){
   if (!cfg) return;
-  syncAccessToCfg();
-  let vMsg = null;
-  try { vMsg = validateConfig(); }
-  catch(e){
-    const lines = e.message.split('\n');
-    toast('保存被拦下：' + lines[0] + (lines.length>1 ? `（共 ${lines.length} 处）` : ''), 'err');
-    alert('配置有必须修改的问题：\n\n' + e.message);
-    return;
-  }
-  if (vMsg && !confirm('发现以下可疑之处（确认无误可继续保存）：\n\n' + vMsg)) return;
-  const oldToken = cfg.adminToken;
-  const r = await api('PUT', '/admin/api/config', cfg);
-  if (r.status === 200){
-    dirty = false;
-    const d = document.getElementById('dirty-dot'); if (d) d.classList.remove('show');
-    if (cfg.adminToken) token = localStorage['akp_admin_token'] = cfg.adminToken;
-    else if (oldToken) token = localStorage['akp_admin_token'] = '';
-    toast('已保存并热重载生效', 'ok');
-    if (r.data.warnings && r.data.warnings.length) toast(r.data.warnings.join('；'), 'err');
-    await loadConfig(); loadStats();
-  } else {
-    toast((r.data && r.data.error && r.data.error.message) || '保存失败', 'err');
+  if (savingNow){ saveAgain = true; return; }   // 已有请求在飞：记一笔，回来后补存
+  savingNow = true;
+  setSaveState('saving');
+  try {
+    syncAccessToCfg();
+    let vMsg = null;
+    try { vMsg = validateConfig(); }
+    catch(e){
+      setSaveState('error', '以下问题改好后会自动保存：\n\n' + e.message);
+      return;
+    }
+    const oldToken = cfg.adminToken;
+    const r = await api('PUT', '/admin/api/config', cfg);
+    if (r.status === 200){
+      if (cfg.adminToken) token = localStorage['akp_admin_token'] = cfg.adminToken;
+      else if (oldToken) token = localStorage['akp_admin_token'] = '';
+      setSaveState(vMsg ? 'warn' : 'saved', vMsg || '');
+    } else {
+      setSaveState('error', (r.data && r.data.error && r.data.error.message) || ('保存失败 HTTP ' + r.status));
+    }
+  } catch(e){
+    setSaveState('error', '保存出错：' + e.message);
+  } finally {
+    savingNow = false;
+    if (saveAgain){ saveAgain = false; markDirty(); }   // 期间又改过 → 再存一次
   }
 }
 
@@ -1578,7 +1622,7 @@ document.addEventListener('click', e=>{
   else if (act === 'delModelCandidate'){ const a=btn.dataset.alias; const arr=cfg.models[a]; arr.splice(idx,1); if(!arr.length) delete cfg.models[a]; renderModels(); markDirty(); }
   else if (act === 'addAccess'){ accessRows.push({key:'',name:'',rpm:0,daily:0,enabled:true}); renderTokens(); markDirty(); }
   else if (act === 'genAccess'){ accessRows.push({key:genKey(),name:'新用户',rpm:10,daily:300,enabled:true}); renderTokens(); markDirty(); }
-  else if (act === 'genAccessBatch'){ for(let n=0;n<5;n++) accessRows.push({key:genKey(),name:'新用户'+(accessRows.length+1),rpm:10,daily:300,enabled:true}); renderTokens(); markDirty(); toast('已生成 5 个随机 Key，记得保存','ok'); }
+  else if (act === 'genAccessBatch'){ for(let n=0;n<5;n++) accessRows.push({key:genKey(),name:'新用户'+(accessRows.length+1),rpm:10,daily:300,enabled:true}); renderTokens(); markDirty(); toast('已生成 5 个随机 Key，正在自动保存','ok'); }
   else if (act === 'delAccess'){ accessRows.splice(idx,1); renderTokens(); markDirty(); }
   else if (act === 'refreshModels'){
     // 只刷新「已经加载过」的平台，不主动拉没碰过的平台

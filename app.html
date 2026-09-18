@@ -117,8 +117,12 @@
   .pv-head input{font-weight:600}
   .keys-label{margin-top:12px}
   .sub-row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-  .dirty-dot{display:none;width:8px;height:8px;border-radius:50%;background:var(--orange);margin-right:6px}
-  .dirty-dot.show{display:inline-block}
+  /* 自动保存状态（替代原「保存配置」按钮） */
+  .save-state{font-size:12.5px;padding:5px 12px;border-radius:20px;border:1px solid transparent;white-space:nowrap}
+  .save-state.ok{color:#047857;background:var(--green-bg);border-color:#a7f3d0}
+  .save-state.dirty{color:var(--muted);background:#f1f5f9;border-color:var(--border)}
+  .save-state.warn{color:#b45309;background:var(--orange-bg);border-color:#fde68a;cursor:pointer}
+  .save-state.err{color:#b91c1c;background:var(--red-bg);border-color:#fecaca;cursor:pointer}
   /* toast */
   #toast{position:fixed;right:24px;bottom:24px;z-index:100;display:flex;flex-direction:column;gap:8px}
   .toast{background:#0f172a;color:#fff;padding:12px 18px;border-radius:12px;font-size:13px;box-shadow:var(--shadow-lg);opacity:0;transform:translateY(8px);transition:.25s}

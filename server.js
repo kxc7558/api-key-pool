@@ -17,6 +17,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const tls = require('node:tls');
 const { Readable, Transform } = require('node:stream');
 
@@ -2279,6 +2280,29 @@ function sanitizeConfig(obj, warnings) {
   return obj;
 }
 
+/* ---------------------------------------------------------------- 配置备份
+ * 写 config.json 前先留一份，能回滚（硬规则：写前必留备份）。
+ * 网页改成「改完自动保存」后写盘频繁得多，这条更不能省。
+ * 目录与 scripts/key-pool.js 的备份一致，回滚方式统一。 */
+const BACKUP_DIR = path.join(os.homedir(), '.api-key-pool-backups');
+const BACKUP_KEEP = 40;   // 只留最近 40 份，防止无限堆积
+
+function backupConfigFile(tag) {
+  try {
+    if (!fs.existsSync(CONFIG_PATH)) return '';
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const f = path.join(BACKUP_DIR, `config-${tag}-${Date.now()}.json`);
+    fs.copyFileSync(CONFIG_PATH, f);
+    // 按修改时间留最新 N 份（按文件名排序会因 tag 不同而错乱）
+    const all = fs.readdirSync(BACKUP_DIR)
+      .filter((n) => /^config-.*\.json$/.test(n))
+      .map((n) => { const p = path.join(BACKUP_DIR, n); let t = 0; try { t = fs.statSync(p).mtimeMs; } catch (_) {} return { p, t }; })
+      .sort((a, b) => b.t - a.t);
+    for (const x of all.slice(BACKUP_KEEP)) { try { fs.unlinkSync(x.p); } catch (_) {} }
+    return f;
+  } catch (_) { return ''; }
+}
+
 async function handleAdminSaveConfig(req, res) {
   const body = await readBody(req, 2 * 1024 * 1024);
   let obj;
@@ -2310,6 +2334,7 @@ async function handleAdminSaveConfig(req, res) {
     obj.alert.email.authCode = newCode.trim();
   }
   const json = JSON.stringify(obj, null, 2);
+  const backupPath = backupConfigFile('web');   // 覆盖前留一份，能回滚
   const tmp = CONFIG_PATH + '.tmp';
   try {
     fs.writeFileSync(tmp, json, 'utf8');
@@ -2328,10 +2353,11 @@ async function handleAdminSaveConfig(req, res) {
   } catch (e) {
     return sendJson(res, 500, { error: { message: '配置已保存但重载失败：' + e.message, type: 'internal_error' } });
   }
-  log('info', `操作台已保存配置：${POOL.providers.size} 平台 / ${POOL.totalKeys()} Key / ${accessUsers.size} 用户`, 'magenta');
+  log('info', `操作台已保存配置：${POOL.providers.size} 平台 / ${POOL.totalKeys()} Key / ${accessUsers.size} 用户${backupPath ? `（备份 ${path.basename(backupPath)}）` : ''}`, 'magenta');
   sendJson(res, 200, {
     ok: true,
     warnings,
+    backup: backupPath,
     applied: { providers: POOL.providers.size, keys: POOL.totalKeys(), users: accessUsers.size },
     adminTokenSet: !!CONFIG.adminToken,
   });
